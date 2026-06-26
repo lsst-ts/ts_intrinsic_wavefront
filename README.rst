@@ -7,12 +7,6 @@ telescope-fixed (OCS) and camera-fixed (CCS) Measured Intrinsic Wavefront (MIW)
 maps from Full Array Mode (FAM) observations, and to read/deploy them in the AOS
 online system.
 
-This package carries the **minimal calibration-generation chain** ported from
-``aaronroodman/rubin-work`` (``aos/``). The upstream repo also has analysis
-steps (validation plots, aberration pairs, per-donut sidecars, WFS-mimic
-covariance, DOF look-up tables, DZ/thermal correlations, bounce tests) that are
-**not** included here — only the chain that produces the MIW maps.
-
 Layout
 ======
 
@@ -205,8 +199,5 @@ versioned calibration lives in ``calibration/miw/`` instead.
 
 Other docs
 ==========
-
-- ``doc/double_zernike_convention_validation.md`` — validation of the DZ
-  index/normalization conventions used throughout.
 - ``pipelines/README.md`` — pipeline quickstart (setup + launch).
 - ``calibration/README.md`` — the versioned calibration store + staging.
