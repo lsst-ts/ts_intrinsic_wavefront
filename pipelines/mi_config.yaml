@@ -1,0 +1,123 @@
+# ----------------------------------------------------------------------
+# Phase-2 measured-intrinsic config.
+# For each param_set, a list of MI configurations.  Each becomes a
+# subdirectory output/<param_set>/<name>/ holding the build (per rotator
+# bin), the OCS/CCS split, the per-donut zk_intrinsic sidecar, and the
+# MI-refit fits.parquet.  Sweep n_dof / n_keep / filter / etc. by adding
+# entries.
+#
+# Naming convention:  <path><n_dof>_<n_keep>_<filter>  e.g. pathA_50_34_i
+#   (first number = n_dof, second = n_keep).
+#
+# n_dof / n_keep may be a SCALAR or a LIST:
+#   scalar n   -> indices 0 .. n-1   (n_dof: 50 = all DOF; n_keep: 34 = modes 0..33)
+#   list [...] -> exactly those indices (to drop individual DOF or v-modes)
+#
+# Keys per entry:
+#   name          subdir name (also the Snakemake wildcard)
+#   path          A (U-mode constrained) | B (reachability)
+#   n_dof         OFC DOF: scalar (0..n-1) or explicit list of DOF indices
+#   n_keep        u/v-modes: scalar (0..n-1) or explicit list of mode indices
+#   filter        band or list of bands (null = all)
+#   programs      science_program (block) whitelist; null = all.  Default keeps
+#                 only BLOCK-T614_triplets and excludes the bounce blocks
+#                 (T720/T724/T710...) where rotator/elevation slew within a triplet.
+#   alt_min_deg / alt_max_deg   elevation window
+#   rotator_bins  list of [lo, hi] rotator windows; the build runs once per bin
+#   build:        build params (k_min/k_max, n_iter, n_bins, fp_radius_*,
+#                 min_donuts, bad_fit_threshold, max_visits, ofc_normalization_yaml,
+#                 height_source, batoid_rubin_height_map_dir, height_map_fits,
+#                 height_to_z4_factor, wfs_edge_cut_deg, ...)
+#   split:        OCS/CCS decomposition params.  Optional knobs:
+#                   rotator_select: subset of rotator_bins to decompose (drop an
+#                     out-of-family epoch sitting at distinct rotator angles); the
+#                     full set of build grids still exists -> no rebuild.
+#                   split_js: Noll j to KEEP a full OCS/CCS split; all OTHER j in
+#                     noll_list become OCS-only (camera term forced to 0 on output).
+#                   ocs_only: explicit Noll j to force OCS-only.
+#   build_from    reuse another entry's already-built per-rotator-bin grids
+#                 (no rebuild); this entry only re-runs split + downstream.
+#   coord_sys     OCS (default)
+# ----------------------------------------------------------------------
+
+# Defaults applied to every entry unless overridden per-entry.
+defaults:
+  path: A
+  filter: [i]
+  programs: [BLOCK-T614_triplets]
+  alt_min_deg: 65.0
+  alt_max_deg: 75.0
+  coord_sys: OCS
+  rotator_bins:
+    - [-65.0, -55.0]
+    - [-50.0, -40.0]
+    - [-35.0, -25.0]
+    - [-20.0, -10.0]
+    - [-3.0, 3.0]
+    - [10.0, 20.0]
+    - [25.0, 35.0]
+    - [40.0, 50.0]
+    - [55.0, 65.0]
+  build:
+    k_min: 1
+    k_max: 6
+    n_iter: 3
+    n_bins: 73
+    fp_radius_basis: 1.8
+    fp_radius_grid: 1.8
+    min_donuts: 100
+    bad_fit_threshold: 2.0
+    max_visits: null
+    ofc_normalization_yaml: null      # null -> ts_config_mttcs range0.5_fwhm-0.15.yaml
+    height_source: batoid_rubin
+    batoid_rubin_height_map_dir: ~/u/LSST/packages/batoid_rubin_data  # holds ccd_height_map.fits.gz; null -> ensure_data_dir, which downloads into the read-only conda env (PermissionError on USDF)
+    height_map_fits: null             # metrology source only
+    height_to_z4_factor: 15.0         # μm of Z4 per mm of CCD piston
+    wfs_edge_cut_deg: 1.75
+  split:
+    rotation_sign: 1                  # fixed field-rotation sense: +1 | -1
+    spin_sign: 1
+    m_max: 12
+    degen_assignment: ocs             # ocs | ccs | split
+    ridge: 1.0e-3
+    hole_dist: 0.06
+    r_min: 0.06
+    r_max: 1.75
+    n_r: 80
+    n_az: 180
+    r_lim_lo: 0.1
+    r_lim_hi: 1.6
+    use_z4_optical: true
+  # NOTE: LUT / aberration-pairs knobs live in analysis_config.yaml, NOT here —
+  # they must not re-trigger the per-rotator-bin build when edited.
+
+measured_intrinsics:
+
+  fam_danish_1_0_wep17_3_0_bin2x:
+    - name: pathA_50_34_i
+      n_dof: 50
+      n_keep: 34
+    - name: pathA_50_50_i
+      n_dof: 50
+      n_keep: 50
+    # March-only (drop out-of-family April-9): reuse pathA_50_34_i's build grids
+    # and decompose only the 5 in-family rotator bins (April-9 sits solely in the
+    # +-30/+-45 bins, so this excludes it by angle).  OCS/CCS split for Z4-Z8;
+    # Z9+ approximated as OCS-only.
+    - name: pathA_50_34_i_5rot
+      n_dof: 50
+      n_keep: 34
+      build_from: pathA_50_34_i
+      split:
+        rotator_select:
+          - [-65.0, -55.0]
+          - [-20.0, -10.0]
+          - [-3.0, 3.0]
+          - [10.0, 20.0]
+          - [55.0, 65.0]
+        split_js: [4, 5, 6, 7, 8]
+
+  fam_danish_1_1_1_wep17_3_0_bin2x:
+    - name: pathA_50_34_i
+      n_dof: 50
+      n_keep: 34

@@ -1,0 +1,48 @@
+version: v1
+param_set: fam_danish_1_0_wep17_3_0_bin2x
+mi_name: pathA_50_34_i_5rot
+source: aos/output/fam_danish_1_0_wep17_3_0_bin2x/pathA_50_34_i_5rot/intrinsic_split_maps.parquet
+staged_utc: '2026-06-24T15:51:56Z'
+git_sha: 9fce54352aa114b06100cddbafe10a3f3d2134a9
+git_describe: pre-measured-intrinsic-2026-06-10-124-g9fce543-dirty
+staged_files:
+- intrinsic_split_maps_v1.parquet
+maps_meta:
+  rotation_sign: 1
+  degen_assignment: ocs
+  thetas_deg:
+  - -60.007
+  - -14.944
+  - -0.281
+  - 14.307
+  - 59.648
+  n_bins_used: 5
+  rotator_select:
+  - - -65.0
+    - -55.0
+  - - -20.0
+    - -10.0
+  - - -3.0
+    - 3.0
+  - - 10.0
+    - 20.0
+  - - 55.0
+    - 65.0
+  ocs_only:
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 22
+  - 23
+  - 24
+  - 25
+  - 26
+  build_from: pathA_50_34_i

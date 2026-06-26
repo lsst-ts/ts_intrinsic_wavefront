@@ -1,0 +1,210 @@
+# ----------------------------------------------------------------------
+# AOS measured-intrinsic CALIBRATION pipeline (Snakemake).
+#
+# Minimal chain that produces the Measured Intrinsic Wavefront (MIW)
+# OCS/CCS maps consumed by the AOS online system and staged into
+# ../calibration/miw/ by ../calibration/stage_miw.py:
+#
+#   mktable -> fit -> combine -> build_intrinsic -> intrinsic_split
+#
+# The Python library lives in the installed package
+# (lsst.ts.intrinsic.wavefront); the run_*.py / combine_parquets.py entry
+# points are bin.src scripts, on PATH after `setup -r <pkg>` + `scons`.
+# Run this from the package's pipelines/ directory (cwd = here), so the
+# configs and output/ resolve relative to it.
+#
+# Config: snake_config.yaml (param_sets -> date chunks); param_sets.yaml
+# (Butler/collection definitions); mi_config.yaml (measured-intrinsic
+# entries, referenced by name).
+#
+#   snakemake -n                 # dry-run: show the plan
+#   snakemake -j4                # build (4 parallel; add --resources mem_mb=... on RSP)
+#   snakemake --dag | dot -Tpng > dag.png
+#
+# Layout:
+#   output/<ps>/chunks/<dmin>_<dmax>/{donuts,visits,fits}.parquet   (per chunk)
+#   output/<ps>/{donuts,visits,fits}.parquet                        (combined)
+#   output/<ps>/<mi>/build/rot_<lo>_<hi>/intrinsic_grid.parquet     (per rotator bin)
+#   output/<ps>/<mi>/intrinsic_split_maps.parquet                   (the MIW calibration)
+# ----------------------------------------------------------------------
+import os
+import json as _json
+import yaml
+
+# Deterministic threading regardless of how the launching terminal set these.
+# A NUMEXPR_MAX_THREADS pinned to 1 (some JupyterHub sessions) crashes mktable;
+# force a safe cap.  One thread per job — parallelism comes from `snakemake -j`.
+os.environ['NUMEXPR_MAX_THREADS'] = '8'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+
+# Package library (entry points are bin.src scripts, invoked by bare name).
+from lsst.ts.intrinsic.wavefront import mi_config as _mc
+
+# Source trees, relative to this pipelines/ dir — declared as rule inputs so a
+# code edit re-triggers the affected rule (Snakemake's code-change trigger only
+# watches a rule's shell command, not the external scripts it calls).
+WF  = "../python/lsst/ts/intrinsic/wavefront"
+BIN = "../bin.src"
+
+PARAM_SETS = yaml.safe_load(open("param_sets.yaml"))
+CFG        = yaml.safe_load(open("snake_config.yaml"))["param_sets"]
+PSETS      = list(CFG)
+
+MI_DOC   = _mc.load_doc("mi_config.yaml") if os.path.exists("mi_config.yaml") else {}
+MI_PSETS = list((MI_DOC or {}).get("measured_intrinsics", {}))
+
+
+def phrase(ps):                                   # matches run_mktable output naming
+    r = PARAM_SETS.get(ps, {})
+    if r.get("collection_phrase"):
+        return r["collection_phrase"]
+    parts = r["fam_collections"][0].split("/")
+    return parts[2] if (parts[0] == "u" and len(parts) > 2) else r["fam_collections"][0]
+
+def chunks(ps):  return [(int(a), int(b)) for a, b in CFG[ps]["chunks"]]
+def coord(ps):   return CFG[ps].get("coord_sys", "OCS")
+def chunk_files(ps, name):
+    return [f"output/{ps}/chunks/{a}_{b}/{name}" for a, b in chunks(ps)]
+
+# ---- measured-intrinsic helpers, driven by mi_config.yaml ----
+def mi_names(ps):   return _mc.mi_names(ps, doc=MI_DOC)
+def mi_rotbins(ps, mi): return _mc.rotator_bins(_mc.load_mi_config(ps, mi, doc=MI_DOC))
+def mi_build_src(ps, mi):
+    # entry whose build grids to read (build_from -> reuse a parent's grids)
+    return _mc.build_source(_mc.load_mi_config(ps, mi, doc=MI_DOC), mi)
+def mi_bin_grids(ps, mi):
+    # grids come from the build SOURCE entry; bins are the source's bins so the
+    # paths point at already-built grids (a build_from entry triggers no build).
+    src = mi_build_src(ps, mi)
+    return [f"output/{ps}/{src}/build/rot_{lo:g}_{hi:g}/intrinsic_grid.parquet"
+            for lo, hi in mi_rotbins(ps, src)]
+MI_PAIRS = [(ps, mi) for ps in MI_PSETS for mi in mi_names(ps)]
+
+# Config-as-params (not config-as-input): pass the RESOLVED per-(ps, mi) config
+# as a Snakemake `params` value rather than listing mi_config.yaml as a rule
+# input.  Snakemake's `params` rerun-trigger then fires only when THIS entry's
+# resolved settings change.  Canonical JSON keeps the hash stable.
+def mi_cfg_json(ps, mi):
+    return _json.dumps(_mc.load_mi_config(ps, mi, doc=MI_DOC),
+                       sort_keys=True, default=str)
+
+wildcard_constraints:
+    ps   = r"[A-Za-z0-9_.+-]+",
+    dmin = r"\d{8}",
+    dmax = r"\d{8}",
+    mi   = r"[A-Za-z0-9_.+-]+",
+    lo   = r"-?\d+(\.\d+)?",
+    hi   = r"-?\d+(\.\d+)?",
+
+rule all:
+    input:
+        # the MIW OCS/CCS maps calibration, per (param_set, mi_name)
+        [f"output/{ps}/{mi}/intrinsic_split_maps.parquet" for ps, mi in MI_PAIRS],
+
+# ---- per chunk: mktable (Butler) -> donuts + visits ----
+rule mktable:
+    output:
+        donuts = "output/{ps}/chunks/{dmin}_{dmax}/donuts.parquet",
+        visits = "output/{ps}/chunks/{dmin}_{dmax}/visits.parquet",
+    params:
+        cdir = lambda w: f"output/{w.ps}/chunks/{w.dmin}_{w.dmax}",
+        ph   = lambda w: phrase(w.ps),
+    resources: mem_mb=4000
+    log: "logs/{ps}.{dmin}_{dmax}.mktable.log"
+    shell:
+        r"""
+        run_mktable.py --param-set {wildcards.ps} \
+            --day-obs-min {wildcards.dmin} --day-obs-max {wildcards.dmax} \
+            --output-dir {params.cdir} > {log} 2>&1
+        mv {params.cdir}/{params.ph}_{wildcards.dmin}_{wildcards.dmax}.parquet {output.donuts}
+        mv {params.cdir}/{params.ph}_{wildcards.dmin}_{wildcards.dmax}_visits.parquet {output.visits}
+        """
+
+# ---- per chunk: Double-Zernike fit ----
+rule fit:
+    input:
+        donuts = "output/{ps}/chunks/{dmin}_{dmax}/donuts.parquet",
+        visits = "output/{ps}/chunks/{dmin}_{dmax}/visits.parquet",
+    output: "output/{ps}/chunks/{dmin}_{dmax}/fits.parquet"
+    params: coord = lambda w: coord(w.ps)
+    resources: mem_mb=4000
+    log: "logs/{ps}.{dmin}_{dmax}.fit.log"
+    shell:
+        "run_dz_fit.py {input.donuts} --coord-sys {params.coord} "
+        "--visits {input.visits} --output {output} > {log} 2>&1"
+
+# ---- combine chunks -> one param_set-level table each ----
+# The called script is declared as an input so editing it triggers a re-run.
+# mktable deliberately does NOT track its script — it would force expensive
+# Butler re-queries on any intrinsics_lib edit.
+rule combine_donuts:
+    input:
+        chunks = lambda w: chunk_files(w.ps, "donuts.parquet"),
+        script = f"{BIN}/combine_parquets.py",
+    output: "output/{ps}/donuts.parquet"
+    resources: mem_mb=3000
+    log:    "logs/{ps}.combine_donuts.log"
+    shell:  "combine_parquets.py {input.chunks} --output {output} > {log} 2>&1"
+
+rule combine_fits:
+    input:
+        chunks = lambda w: chunk_files(w.ps, "fits.parquet"),
+        script = f"{BIN}/combine_parquets.py",
+    output: "output/{ps}/fits.parquet"
+    resources: mem_mb=2000
+    log:    "logs/{ps}.combine_fits.log"
+    shell:  "combine_parquets.py {input.chunks} --output {output} > {log} 2>&1"
+
+rule combine_visits:
+    input:
+        chunks = lambda w: chunk_files(w.ps, "visits.parquet"),
+        script = f"{BIN}/combine_parquets.py",
+    output: "output/{ps}/visits.parquet"
+    resources: mem_mb=2000
+    log:    "logs/{ps}.combine_visits.log"
+    shell:  "combine_parquets.py {input.chunks} --output {output} > {log} 2>&1"
+
+# ======================================================================
+# Measured intrinsic, per (param_set, mi_name) from mi_config.yaml:
+#   build_intrinsic (per rotator bin) -> intrinsic_split.
+# RSP-only (needs lsst.ts.ofc/wep + TS_CONFIG_MTTCS_DIR + batoid height maps).
+# ======================================================================
+
+# ---- per rotator bin: build the Path-A measured-intrinsic grid ----
+rule build_intrinsic:
+    input:
+        donuts = "output/{ps}/donuts.parquet",
+        visits = "output/{ps}/visits.parquet",
+        fits   = "output/{ps}/fits.parquet",
+        script = f"{BIN}/run_build_intrinsic.py",
+        lib    = f"{WF}/measured_intrinsic.py",
+        plots  = f"{WF}/intrinsic_build_plots.py",
+    output: "output/{ps}/{mi}/build/rot_{lo}_{hi}/intrinsic_grid.parquet"
+    params: cfg = lambda w: mi_cfg_json(w.ps, w.mi)   # rerun-trigger only
+    resources: mem_mb=8000
+    log: "logs/{ps}.{mi}.build_rot_{lo}_{hi}.log"
+    shell:
+        "run_build_intrinsic.py --param-set {wildcards.ps} "
+        "--mi-name {wildcards.mi} --rot-min {wildcards.lo} --rot-max {wildcards.hi} "
+        "> {log} 2>&1"
+
+# ---- decompose the per-bin grids into OCS + CCS (the MIW calibration) ----
+rule intrinsic_split:
+    input:
+        grids  = lambda w: mi_bin_grids(w.ps, w.mi),
+        script = f"{BIN}/run_intrinsic_split.py",
+        lib    = f"{WF}/intrinsic_split.py",
+    output:
+        maps   = "output/{ps}/{mi}/intrinsic_split_maps.parquet",
+        decomp = "output/{ps}/{mi}/intrinsic_split_decomp.parquet",
+        rms    = "output/{ps}/{mi}/intrinsic_split_rms.parquet",
+        plots  = "output/{ps}/{mi}/intrinsic_split.pdf",
+    params: cfg = lambda w: mi_cfg_json(w.ps, w.mi)   # rerun-trigger only
+    resources: mem_mb=4000
+    log: "logs/{ps}.{mi}.intrinsic_split.log"
+    shell:
+        "run_intrinsic_split.py --param-set {wildcards.ps} "
+        "--mi-name {wildcards.mi} > {log} 2>&1"

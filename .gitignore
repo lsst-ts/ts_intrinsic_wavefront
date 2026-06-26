@@ -13,9 +13,16 @@ config.log
 version.py
 bin/
 
+# Snakemake pipeline products (regenerated; the frozen calibration lives in
+# calibration/, not here).  See pipelines/Snakefile.
+pipelines/output/
+pipelines/logs/
+.snakemake/
+
 # Pytest
 tests/.tests
 pytest_session.txt
 .cache/
 .pytest_cache
 .coverage
+__pycache__/

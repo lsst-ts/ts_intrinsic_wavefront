@@ -1,0 +1,108 @@
+# Parameter sets for AOS FAM wavefront analysis
+#
+# Each entry defines a dataset processed by Bryce Kalmbach's Butler pipelines.
+# Referenced by name in runs.yaml and by --param-set in run_mktable.py.
+#
+# Fields:
+#   butler_repo:      Butler repository path
+#   fam_collections:  Butler collection name(s)
+#   fam_programs:     Science program names (test blocks)
+#   day_obs_min/max:  Date range covered by the collection (optional)
+
+fam_danish_v15_aug_oct:
+  description: "Aug-Oct 2025, wep v15.0.2, dviz v2.5.0"
+  butler_repo: /repo/main
+  fam_programs: [T278, T381, T492, T539, T614]
+  fam_collections:
+    - u/brycek/aos_fam_danish/wep_v15_0_2/donut_viz_v2_5_0/20250801_20250831
+    - u/brycek/aos_fam_danish/wep_v15_0_2/donut_viz_v2_5_0/20250901_20251028
+  day_obs_min: 20250801
+  day_obs_max: 20251028
+
+fam_danish_step2_v16_5:
+  description: "Oct-Dec 2025, wep v16.5.0, dviz v3.2.3 (step2)"
+  butler_repo: /repo/main
+  fam_programs: [T278, T381, T492, T539, T614]
+  fam_collections:
+    - u/brycek/aos_fam_danish_step2/wep_v16_5_0/donut_viz_v3_2_3/20251020_20251231
+  day_obs_min: 20251020
+  day_obs_max: 20251231
+
+fam_danish_v16_8_matched:
+  description: "Oct-Dec 2025, wep v16.8.0, dviz v3.5.0, matched wavefront zernikes"
+  butler_repo: /repo/main
+  fam_programs: [T278, T381, T492, T539, T614]
+  fam_collections:
+    - u/brycek/aos_fam_danish/wep_v16_8_0/donut_viz_v3_5_0/match_wavefront_zernikes/20251020_20251231
+  day_obs_min: 20251020
+  day_obs_max: 20251231
+
+fam_danish_triplets:
+  description: "Mar 2026, embargo repo, triplets collection"
+  butler_repo: /repo/embargo
+  fam_programs: [T278, T381, T492, T539, T614]
+  fam_collections:
+    - aos_fam_danish_triplets
+  day_obs_min: 20260315
+  day_obs_max: 20260405
+
+fam_danish_triplets_bin1x:
+  description: "Mar 2026, embargo repo, triplets bin 1x"
+  butler_repo: /repo/embargo
+  fam_programs: [T278, T381, T492, T539, T614]
+  fam_collections:
+    - aos_fam_danish_triplets_bin_1x
+  day_obs_min: 20260315
+  day_obs_max: 20260317
+
+fam_danish_v16_9_mar25:
+  description: "Mar 25, 2026, wep v16.9.0, dviz v3.6.0, matched"
+  butler_repo: /repo/embargo
+  fam_programs: [T614, T710]
+  fam_collections:
+    - u/brycek/aos_fam_danish/wep_v16_9_0/donut_viz_v3_6_0/match_wavefront_zernikes/20260325
+  day_obs_min: 20260325
+  day_obs_max: 20260325
+
+fam_danish_v1_triplets_bin_1x:
+  description: "Mar-May 2026, embargo repo, Danish v1.0 triplets bin 1x"
+  butler_repo: /repo/embargo
+  fam_programs: [T278, T381, T492, T539, T614, T710, T717, T720, T724]
+  fam_collections:
+    - aos_fam_danish_v1_triplets_bin_1x
+  day_obs_min: 20260315
+  day_obs_max: 20260430
+
+fam_danish_v1_triplets_bin_2x:
+  description: "Mar-May 2026, embargo repo, Danish v1.0 triplets (bin=2 default)"
+  butler_repo: /repo/embargo
+  fam_programs: [T278, T381, T492, T539, T614, T710, T717, T720, T724]
+  fam_collections:
+    - aos_fam_danish_v1_triplets_bin_2x
+  day_obs_min: 20260315
+  day_obs_max: 20260430
+
+fam_danish_1_0_wep17_3_0_bin2x:
+  description: "Mar-May 2026, /repo/main, Danish 1.0 wep 17.3.0 dv 4.2.0 bin x2 paired"
+  butler_repo: /repo/main
+  fam_programs: [T278, T381, T492, T539, T614, T710, T717, T720, T724]
+  fam_collections:
+    - LSSTCam/runs/aos/fam/danish_1_0/wep_17_3_0/dv_4_2_0/bin_x2/paired
+  # In-focus corner-WFS (cwfs) collection paired with this FAM run; the in-focus
+  # exposure is FAM_seq+1 (triplet order intra, extra, in-focus; FAM key = extra).
+  wfs_collection: LSSTCam/runs/aos/cwfs/danish_1_0/wep_17_3_0/dv_4_2_0/bin_x2
+  # Collection name has slashes — set an explicit filename-safe phrase
+  collection_phrase: aos_fam_danish_1_0_wep17_3_0_bin2x
+  day_obs_min: 20260315
+  day_obs_max: 20260531
+
+fam_danish_1_1_1_wep17_3_0_bin2x:
+  description: "Mar-May 2026, /repo/main, Danish 1.1.1 wep 17.3.0 dv 4.2.0 bin x2 paired; reuse RSO-582 donut stamps"
+  butler_repo: /repo/main
+  fam_programs: [T278, T381, T492, T539, T614, T710, T717, T720, T724]
+  fam_collections:
+    - LSSTCam/runs/aos/fam/danish_1_1_1/wep_17_3_0/dv_4_2_0/bin_x2/paired
+  # Collection name has slashes — set an explicit filename-safe phrase
+  collection_phrase: aos_fam_danish_1_1_1_wep17_3_0_bin2x
+  day_obs_min: 20260315
+  day_obs_max: 20260531
