@@ -14,13 +14,19 @@ Layout
   intrinsic build, OCS/CCS split, OFC SVD, CCD heights, config loaders), plus
   the ``common/`` subpackage.
 - ``bin.src/`` — pipeline entry points (``run_mktable``, ``run_dz_fit``,
-  ``run_build_intrinsic``, ``run_intrinsic_split``, ``combine_parquets``).
+  ``run_build_intrinsic``, ``run_intrinsic_split``, ``combine_parquets``), plus
+  the calibration-table tools ``run_make_calib_tables`` (MIW maps →
+  ``IntrinsicZernikes`` source tables) and ``ingest_calib_tables`` (those tables
+  → Butler).
 - ``pipelines/`` — Snakemake driver + configs to generate the calibration.
   Quickstart: ``pipelines/README.md``.
 - ``calibration/`` — versioned, frozen MIW map products + ``stage_miw.py``.
   Details: ``calibration/README.md``.
 - ``notebooks/aos_miw_ocs_ccs_maps.ipynb`` — standalone OCS/CCS map reader
-  (numpy / matplotlib / astropy / scipy only; no LSST stack).
+  (numpy / matplotlib / astropy / scipy only; no LSST stack);
+  ``notebooks/plot_calib_tables.ipynb`` — view the generated per-filter
+  ``IntrinsicZernikes`` source tables; ``notebooks/compare_calib_tables_vs_v1.ipynb``
+  — diff new calib tables against an old frozen map.
 
 The calibration-generation pipeline is RSP-only (Butler + ``ts_wep`` /
 ``ts_ofc``); the map-reader notebook runs anywhere.
@@ -141,6 +147,45 @@ least-squares keeps **O** hole-free. Writes, under ``output/<ps>/<mi>/``:
 The ``intrinsic_split_maps.parquet`` is what ``calibration/stage_miw.py``
 freezes into the versioned calibration store, and what the standalone reader
 notebook ``notebooks/aos_miw_ocs_ccs_maps.ipynb`` plots.
+
+Calibration tables for the Butler
+=================================
+
+``bin.src/run_make_calib_tables.py`` (library: ``calib_tables``) turns an
+``intrinsic_split_maps.parquet`` into the **source tables** that
+``lsst.ip.isr.IntrinsicZernikes`` ingests: astropy tables with columns ``x``,
+``y`` (deg) and ``Z{j}`` (µm) plus a ``coord_sys`` (``CCS``/``OCS``) ``meta``
+key.  It writes one CCS and one OCS table **per ``physical_filter``** under
+``<out-root>/<version>/``, with a ``provenance.yaml`` (map source, git state,
+filters / Noll indices, the maps' own ``.meta``).  The MIW map is currently
+filter- **and** detector-independent, so the same table pair is emitted for
+every band:
+
+.. code-block:: bash
+
+    # from the frozen v1 maps, all six LSSTCam bands, version v2
+    run_make_calib_tables.py \
+        --maps calibration/miw/intrinsic_split_maps_v1.parquet --version v2
+    # or from a fresh pipeline run
+    run_make_calib_tables.py \
+        --param-set fam_danish_1_2_0_wep17_6_1_bin2x \
+        --mi-name pathA_50_34_i_5rot --version v2
+
+Default ``--out-root`` is
+``/sdf/group/rubin/repo/aos_imsim/gmegias/intrinsic_zernikes`` (so the example
+above writes ``.../intrinsic_zernikes/v2/``).  Needs only astropy + numpy +
+pyyaml — no Butler.
+
+``bin.src/ingest_calib_tables.py`` is the (separate, **not run automatically**)
+ingest step.  It builds one ``IntrinsicZernikes`` per filter **combining the CCS
+and OCS tables**, and ``butler.put``\ s a copy for **every detector** (the
+``intrinsicZernikes`` dataset type is dimensioned
+``instrument × detector × physical_filter`` and ``CalcZernikesTask`` looks it up
+per detector, so the detector-independent map is replicated across detectors to
+preserve that contract).  It defaults to ``--dry-run``; pass ``--execute`` to
+write.  This is the OCS-aware counterpart to ts_wep's
+``ingestIntrinsicZernikes`` (which builds a CCS-only calibration from
+single-table sources already in a Butler collection).
 
 Configuration
 =============
