@@ -16,8 +16,8 @@ Layout
 - ``bin.src/`` — pipeline entry points (``run_mktable``, ``run_dz_fit``,
   ``run_build_intrinsic``, ``run_intrinsic_split``, ``combine_parquets``), plus
   the calibration-table tools ``run_make_calib_tables`` (MIW maps →
-  ``IntrinsicZernikes`` source tables) and ``ingest_calib_tables`` (those tables
-  → Butler).
+  ``IntrinsicZernikes`` source tables), ``plot_calib_tables`` (OCS/CCS
+  components → PDF) and ``ingest_calib_tables`` (those tables → Butler).
 - ``pipelines/`` — Snakemake driver + configs to generate the calibration.
   Quickstart: ``pipelines/README.md``.
 - ``calibration/`` — versioned, frozen MIW map products + ``stage_miw.py``.
@@ -200,6 +200,13 @@ Default ``--out-root`` is
 needs only astropy/numpy; the per-detector height piston additionally needs the
 LSST stack (cameraGeom + obs_lsst) and the batoid_rubin / metrology height map
 (``--no-heights`` skips it).
+
+``bin.src/plot_calib_tables.py`` writes a multi-page PDF from the generated
+tables: a per-detector Z4-piston summary, then per-Noll-index OCS map beside the
+CCS map for a representative detector (numpy/matplotlib/astropy only)::
+
+    plot_calib_tables.py --tables-dir <out-root>/<version> \
+        --out intrinsic_zernikes_<version>_maps.pdf
 
 ``bin.src/ingest_calib_tables.py`` is the (separate, **not run automatically**)
 ingest step.  It builds one ``IntrinsicZernikes`` **per detector** (the shared
