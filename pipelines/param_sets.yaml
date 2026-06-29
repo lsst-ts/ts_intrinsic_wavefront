@@ -106,3 +106,16 @@ fam_danish_1_1_1_wep17_3_0_bin2x:
   collection_phrase: aos_fam_danish_1_1_1_wep17_3_0_bin2x
   day_obs_min: 20260315
   day_obs_max: 20260531
+
+fam_danish_1_2_0_wep17_6_1_bin2x:
+  description: "Mar-May 2026, /repo/main, Danish 1.2.0 alpha0 wep 17.6.1 dv 4.5.0 bin x2 paired, refitWcs"
+  butler_repo: /repo/main
+  # NOTE: programs / day_obs copied from the 1.1.1 entry — confirm against the
+  # actual contents of the refitWcs collection before a production run.
+  fam_programs: [T278, T381, T492, T539, T614, T710, T717, T720, T724]
+  fam_collections:
+    - u/scichris/LSSTCam/runs/aos/fam/danish_1_2_0_alpha0/wep_17_6_1/dv_4_5_0/bin_x2/paired/refitWcs
+  # Collection name has slashes — set an explicit filename-safe phrase
+  collection_phrase: aos_fam_danish_1_2_0_wep17_6_1_bin2x
+  day_obs_min: 20260315
+  day_obs_max: 20260531
