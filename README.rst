@@ -153,39 +153,64 @@ Calibration tables for the Butler
 
 ``bin.src/run_make_calib_tables.py`` (library: ``calib_tables``) turns an
 ``intrinsic_split_maps.parquet`` into the **source tables** that
-``lsst.ip.isr.IntrinsicZernikes`` ingests: astropy tables with columns ``x``,
-``y`` (deg) and ``Z{j}`` (µm) plus a ``coord_sys`` (``CCS``/``OCS``) ``meta``
-key.  It writes one CCS and one OCS table **per ``physical_filter``** under
-``<out-root>/<version>/``, with a ``provenance.yaml`` (map source, git state,
-filters / Noll indices, the maps' own ``.meta``).  The MIW map is currently
-filter- **and** detector-independent, so the same table pair is emitted for
-every band:
+``lsst.ip.isr.IntrinsicZernikes`` ingests (astropy tables with columns ``x``,
+``y`` in deg and ``Z{j}`` in µm plus a ``coord_sys`` (``CCS``/``OCS``) ``meta``
+key).  The two systems are split by their physical nature, which matches how
+``IntrinsicZernikes.getIntrinsicZernikes`` queries them — the OCS point is
+rotated by the rotator before interpolation, the CCS point is not:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Product (under ``<out-root>/<version>/``)
+     - Contents
+   * - ``intrinsic_aberrations_OCS.parquet``
+     - the telescope-fixed intrinsics — the **whole** focal-plane map, written
+       **once** (detector- and filter-independent; the rotated OCS query can
+       land anywhere on the focal plane)
+   * - ``intrinsic_aberrations_CCS_det<NNN>.parquet``
+     - **per detector**: the smooth camera field ``C`` plus that CCD's
+       focal-plane height as a ``Z4`` piston (``ccd_height``; 15 µm/mm).  The
+       CCS query stays within the detector, and the height makes it
+       detector-specific
+   * - ``provenance.yaml``
+     - map source, git state, detectors, height source, per-detector pistons,
+       the maps' own ``.meta``
+
+Filters are handled at **ingest** time (the tables are filter-independent; the
+``physical_filter`` lives only in the dataId), so the Butler dataset type stays
+per ``(detector, physical_filter)`` and **no ts_wep change is needed**.
 
 .. code-block:: bash
 
-    # from the frozen v1 maps, all six LSSTCam bands, version v2
+    # all LSSTCam detectors, batoid_rubin heights, from the frozen v1 maps
     run_make_calib_tables.py \
         --maps calibration/miw/intrinsic_split_maps_v1.parquet --version v2
     # or from a fresh pipeline run
     run_make_calib_tables.py \
         --param-set fam_danish_1_2_0_wep17_6_1_bin2x \
         --mi-name pathA_50_34_i_5rot --version v2
+    # quick stack-free smoke test (CCS = smooth field only, no height piston)
+    run_make_calib_tables.py --maps <maps> --version test \
+        --no-heights --detectors 90 91
 
 Default ``--out-root`` is
-``/sdf/group/rubin/repo/aos_imsim/gmegias/intrinsic_zernikes`` (so the example
-above writes ``.../intrinsic_zernikes/v2/``).  Needs only astropy + numpy +
-pyyaml — no Butler.
+``/sdf/group/rubin/repo/aos_imsim/gmegias/intrinsic_zernikes``.  The OCS table
+needs only astropy/numpy; the per-detector height piston additionally needs the
+LSST stack (cameraGeom + obs_lsst) and the batoid_rubin / metrology height map
+(``--no-heights`` skips it).
 
 ``bin.src/ingest_calib_tables.py`` is the (separate, **not run automatically**)
-ingest step.  It builds one ``IntrinsicZernikes`` per filter **combining the CCS
-and OCS tables**, and ``butler.put``\ s a copy for **every detector** (the
-``intrinsicZernikes`` dataset type is dimensioned
-``instrument × detector × physical_filter`` and ``CalcZernikesTask`` looks it up
-per detector, so the detector-independent map is replicated across detectors to
-preserve that contract).  It defaults to ``--dry-run``; pass ``--execute`` to
-write.  This is the OCS-aware counterpart to ts_wep's
-``ingestIntrinsicZernikes`` (which builds a CCS-only calibration from
-single-table sources already in a Butler collection).
+ingest step.  It builds one ``IntrinsicZernikes`` **per detector** (the shared
+OCS system + that detector's CCS system) and ``butler.put``\ s it for every
+requested ``physical_filter``.  Each calibration is verified by default before
+any write (interpolators built; ``getIntrinsicZernikes`` finite at interior
+points, including through the OCS rotation) — a failure aborts the run;
+``--no-verify`` skips it.  It defaults to ``--dry-run``; pass ``--execute`` to
+write.  This is the OCS-aware counterpart to ts_wep's ``ingestIntrinsicZernikes``
+(which builds a CCS-only calibration from single-table sources already in a
+Butler collection).
 
 Configuration
 =============
