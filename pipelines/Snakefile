@@ -79,7 +79,7 @@ def mi_bin_grids(ps, mi):
     # grids come from the build SOURCE entry; bins are the source's bins so the
     # paths point at already-built grids (a build_from entry triggers no build).
     src = mi_build_src(ps, mi)
-    return [f"output/{ps}/{src}/build/rot_{lo:g}_{hi:g}/intrinsic_grid.parquet"
+    return ["output/%s/%s/build/rot_%g_%g/intrinsic_grid.parquet" % (ps, src, lo, hi)
             for lo, hi in mi_rotbins(ps, src)]
 MI_PAIRS = [(ps, mi) for ps in MI_PSETS for mi in mi_names(ps)]
 
