@@ -218,10 +218,8 @@ def main():
           f"|C| cam RMS={np.sqrt((metrics_df['C_cam']**2).mean()):.4f} um")
 
     base.mkdir(parents=True, exist_ok=True)
-    # Maps are sampled on the rot~0 bin's regular disk-grid field points (the
-    # build grid is a 71x71 Cartesian lattice masked to the field radius).
     i0 = int(np.argmin(np.abs(thetas)))
-    thx0, thy0 = dsets[i0]['thx'], dsets[i0]['thy']
+    thx0, thy0 = _complete_disk_grid(dsets[i0]['thx'], dsets[i0]['thy'])
     meta = dict(rotation_sign=int(s), degen_assignment=str(sp['degen_assignment']),
                 thetas_deg=[float(t) for t in np.round(thetas, 3)],
                 n_bins_used=int(len(thetas)),
@@ -240,6 +238,31 @@ def main():
 # ----------------------------------------------------------------------
 # output tables (all-parquet astropy Tables)
 # ----------------------------------------------------------------------
+def _complete_disk_grid(thx, thy):
+    """Rebuild the full Cartesian lattice (masked to the field radius) from a
+    hole-punched build grid.
+
+    The build grid is a regular square lattice masked to a disk, but with cells
+    dropped wherever a CCD had no donuts.  This reconstructs the underlying
+    lattice from its own spacing/extent and re-applies only the radius mask, so
+    the no-donut cells are put back as output sample points (their OCS/CCS values
+    are then filled by evaluating the decomposition there).  Returns the flat
+    ``(thx0, thy0)`` disk grid.
+    """
+    thx = np.asarray(thx, dtype=float)
+    thy = np.asarray(thy, dtype=float)
+    ux = np.unique(np.round(thx, 4))
+    step = float(np.median(np.diff(ux)))
+    lo = min(float(ux.min()), float(np.round(thy, 4).min()))
+    hi = max(float(ux.max()), float(np.round(thy, 4).max()))
+    n = int(round((hi - lo) / step)) + 1
+    axis = np.linspace(lo, hi, n)
+    gx, gy = np.meshgrid(axis, axis)
+    R = float(np.hypot(thx, thy).max())
+    keep = np.hypot(gx, gy) <= R + 1e-9
+    return gx[keep].ravel(), gy[keep].ravel()
+
+
 def _write_outputs(base, dec_by_j, noll_list, metrics_df, A, X, Y,
                    thx0, thy0, meta):
     """Write the three parquet products (all astropy Tables):
