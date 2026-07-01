@@ -19,6 +19,11 @@ pipelines/output/
 pipelines/logs/
 .snakemake/
 
+pipelines/*_detached.sh
+pipelines/*_detached.log
+pipelines/run_calib_v2_ingest_execute.sh
+python/*.dist-info/
+
 # Pytest
 tests/.tests
 pytest_session.txt
