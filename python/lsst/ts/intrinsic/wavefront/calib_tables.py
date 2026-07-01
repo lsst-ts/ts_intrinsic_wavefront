@@ -55,6 +55,7 @@ __all__ = [
     "maps_noll_indices",
     "ocs_source_table",
     "ccs_source_table",
+    "ccs_source_table_on_grid",
 ]
 
 import re
@@ -168,7 +169,7 @@ def ocs_source_table(maps, noll_list=None, instrument="LSSTCam"):
 
 
 def ccs_source_table(maps, detector=None, piston_z4_um=0.0, noll_list=None,
-                     instrument="LSSTCam"):
+                     instrument="LSSTCam", zero_camera_field=False):
     """Build a per-detector CCS source table from the maps.
 
     The CCS values are the smooth camera field ``C`` (the ``Z{j}_CCS`` columns)
@@ -188,6 +189,12 @@ def ccs_source_table(maps, detector=None, piston_z4_um=0.0, noll_list=None,
         Subset of Noll indices; default all shared.
     instrument : `str`, optional
         Recorded in ``meta``.
+    zero_camera_field : `bool`, optional
+        If ``True``, zero the smooth camera field ``C`` and keep only the ``Z4``
+        height piston (all other Noll become 0).  Used for the field-edge CCDs
+        that sit past the data: there is no measured camera field for them, so
+        it is more honest to store the height-only term than a whole-field
+        placeholder.  Default ``False``.
 
     Returns
     -------
@@ -197,14 +204,128 @@ def ccs_source_table(maps, detector=None, piston_z4_um=0.0, noll_list=None,
     """
     js = _resolve_js(maps, noll_list)
     thx, thy = _xy_finite(maps)
-    columns = {j: np.asarray(maps[f"Z{j}_CCS"], dtype=float) for j in js}
+    if zero_camera_field:
+        columns = {j: np.zeros(len(thx), dtype=float) for j in js}
+    else:
+        columns = {j: np.asarray(maps[f"Z{j}_CCS"], dtype=float) for j in js}
     if piston_z4_um:
         if 4 not in columns:
             raise ValueError("piston_z4_um given but Z4 is not among the "
                              "selected Noll indices")
         columns[4] = columns[4] + float(piston_z4_um)
-    extra = {"instrument": instrument, "piston_z4_um": float(piston_z4_um)}
+    extra = {"instrument": instrument, "piston_z4_um": float(piston_z4_um),
+             "camera_field": (not zero_camera_field)}
     if detector is not None:
         extra["detector"] = int(detector)
     return _build_table(thx, thy, columns, js, "CCS", dict(maps.meta),
+                        extra_meta=extra)
+
+
+# Per-(maps, noll) CCS interpolators are expensive to build (a Delaunay
+# triangulation of the whole field grid per Noll) and identical for every
+# detector, so cache them.  The maps object is held in the value both to key on
+# identity and to stop its id() being recycled while cached.
+_CCS_INTERP_CACHE = {}
+
+
+def _ccs_interpolators(maps, js):
+    """Build (and cache) a linear interpolator per ``Z{j}_CCS`` map column."""
+    from scipy.interpolate import LinearNDInterpolator
+
+    key = (id(maps), tuple(js))
+    cached = _CCS_INTERP_CACHE.get(key)
+    if cached is not None and cached[0] is maps:
+        return cached[1]
+    thx, thy = _xy_finite(maps)
+    good = np.isfinite(thx) & np.isfinite(thy)
+    pts = np.column_stack([thx[good], thy[good]])
+    interps = {}
+    for j in js:
+        v = np.asarray(maps[f"Z{j}_CCS"], dtype=float)[good]
+        m = np.isfinite(v)
+        interps[j] = LinearNDInterpolator(pts[m], v[m])
+    _CCS_INTERP_CACHE[key] = (maps, interps)
+    return interps
+
+
+def _interp_ccs_map(maps, js, x_deg, y_deg):
+    """Interpolate the smooth CCS camera field ``Z{j}_CCS`` onto (x, y) points.
+
+    Uses a linear (barycentric) interpolator over the maps' own field grid.
+    Points that fall **outside** the maps' convex hull (i.e. past the data
+    support) get NaN — never an extrapolated value — so the caller drops them
+    rather than inventing a camera field where there was no data.
+
+    Parameters
+    ----------
+    maps : `astropy.table.Table`
+        MIW maps table (``thx_deg``, ``thy_deg``, ``Z{j}_CCS``).
+    js : `list` [`int`]
+        Noll indices to interpolate.
+    x_deg, y_deg : `numpy.ndarray`
+        Target field positions in degrees, in the **CCS** frame (same
+        convention as ``thx_deg``/``thy_deg``).
+
+    Returns
+    -------
+    `dict` [`int`, `numpy.ndarray`]
+        ``{j: values at (x, y)}`` (µm), NaN outside the map support.
+    """
+    interps = _ccs_interpolators(maps, js)
+    xi = np.column_stack([np.asarray(x_deg, float), np.asarray(y_deg, float)])
+    return {j: interps[j](xi) for j in js}
+
+
+def ccs_source_table_on_grid(maps, x_deg, y_deg, height_z4_um=None,
+                             detector=None, noll_list=None, instrument="LSSTCam"):
+    """Build a per-detector CCS source table sampled on an explicit point grid.
+
+    Unlike `ccs_source_table` (which reuses the whole-focal-plane maps grid and
+    adds a single scalar Z4 piston), this samples the smooth camera field ``C``
+    at the caller-supplied ``(x, y)`` points — a per-detector footprint grid —
+    and adds a **per-point** Z4 height, so the CCD's intra-detector height
+    structure is preserved instead of collapsed to its centre value.
+
+    Points outside the maps' data support interpolate to NaN and are dropped
+    (no extrapolation).
+
+    Parameters
+    ----------
+    maps : `astropy.table.Table`
+        MIW maps table (uses the ``Z{j}_CCS`` columns).
+    x_deg, y_deg : `array-like`
+        Sample positions in degrees, in the **CCS** frame.
+    height_z4_um : `array-like`, optional
+        Per-point Z4 height contribution (µm), same length as ``x_deg``; added
+        to the ``Z4`` column.  ``None`` leaves the smooth field unchanged.
+    detector : `int`, optional
+        Detector id; recorded in ``meta``.
+    noll_list : `list` [`int`], optional
+        Subset of Noll indices; default all shared.
+    instrument : `str`, optional
+        Recorded in ``meta``.
+
+    Returns
+    -------
+    `astropy.table.Table`
+        Columns ``x`` (deg), ``y`` (deg), ``Z{j}`` (µm); ``meta["coord_sys"]``
+        == ``"CCS"``.  Rows with any non-finite value are dropped.
+    """
+    js = _resolve_js(maps, noll_list)
+    x = np.asarray(x_deg, dtype=float)
+    y = np.asarray(y_deg, dtype=float)
+    columns = _interp_ccs_map(maps, js, x, y)
+    if height_z4_um is not None:
+        if 4 not in columns:
+            raise ValueError("height_z4_um given but Z4 is not among the "
+                             "selected Noll indices")
+        columns[4] = columns[4] + np.asarray(height_z4_um, dtype=float)
+    extra = {"instrument": instrument}
+    if detector is not None:
+        extra["detector"] = int(detector)
+    if height_z4_um is not None:
+        # height is applied PER POINT here (not a scalar piston); record only the
+        # mean as a diagnostic summary of the CCD's height field.
+        extra["mean_z4_height_um"] = float(np.nanmean(np.asarray(height_z4_um, float)))
+    return _build_table(x, y, columns, js, "CCS", dict(maps.meta),
                         extra_meta=extra)

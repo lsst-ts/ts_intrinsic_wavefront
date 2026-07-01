@@ -30,11 +30,14 @@ in µm) and writes, under ``<out-root>/<version>/``:
   filter-independent (the OCS query point is rotated by the rotator, so each
   detector needs the whole map).
 * ``intrinsic_aberrations_CCS_det<NNN>.parquet`` — one **per detector**: the
-  smooth camera field ``C`` plus that CCD's focal-plane height as a Z4 piston
-  (``ccd_height``; 15 µm/mm).  The CCS query point is never rotated, so each
-  detector only needs its own value, and the height makes it detector-specific.
+  smooth camera field ``C`` sampled on a grid of points across the CCD footprint,
+  with the CCD focal-plane height (``ccd_height``; 15 µm/mm) added to ``Z4`` at
+  **each point** (so the intra-CCD height structure is preserved).  The CCS query
+  point is never rotated, so each detector only needs its own footprint.  The
+  ~16 field-edge CCDs whose footprints fall past the data are stored height-only
+  (``Z4`` = mean height, camera field zeroed).
 * ``provenance.yaml`` — map source, git state, detectors, height source, the
-  per-detector pistons, and the maps' own ``.meta``.
+  list of height-only fallback detectors, and the maps' own ``.meta``.
 
 Filters are handled at **ingest** time (the tables are filter-independent; the
 ``physical_filter`` is set in the dataId, replicating across bands), so nothing
@@ -43,24 +46,15 @@ filter-specific is written here.  The Butler dataset type stays per
 
 Locate the maps with ``--maps PATH`` or, mirroring ``calibration/stage_miw.py``,
 via ``--param-set``/``--mi-name`` (``--output-root`` defaults to
-``pipelines/output``).
+``pipelines/output``).  Needs the LSST stack (cameraGeom + obs_lsst) and the
+batoid_rubin / metrology height map.
 
-The per-detector heights need the LSST stack (cameraGeom + obs_lsst) and the
-batoid_rubin / metrology height map.  Use ``--no-heights`` for a quick,
-stack-free run (CCS = smooth camera field only, Z4 piston 0); combine with an
-explicit ``--detectors`` list to avoid needing the camera at all.
+Example
+-------
+Full run, all LSSTCam detectors, batoid_rubin heights, version v4::
 
-Examples
---------
-Full run, all LSSTCam detectors, batoid_rubin heights, version v2::
-
-    run_make_calib_tables.py \
-        --maps calibration/miw/intrinsic_split_maps_v1.parquet --version v2
-
-Quick stack-free smoke test for two detectors::
-
-    run_make_calib_tables.py --maps <maps> --version test \
-        --no-heights --detectors 90 91
+    run_make_calib_tables.py --param-set <ps> --mi-name <mi> --version v4 \
+        --height-source batoid_rubin --height-map-dir <ccd_height_map>
 """
 import argparse
 import sys
@@ -105,40 +99,86 @@ def _get_camera(instrument):
     if instrument == "LSSTComCam":
         from lsst.obs.lsst import LsstComCam
         return LsstComCam().getCamera()
-    raise ValueError(f"don't know the camera for instrument {instrument!r}; "
-                     f"pass --detectors and --no-heights")
+    raise ValueError(f"don't know the camera for instrument {instrument!r}")
 
 
-def _per_detector_piston_z4(camera, source, height_map_dir, metrology_fits, factor):
-    """Return {detector_id: Z4 piston (µm)} from the CCD height at each CCD centre.
+def _detector_footprints(camera, detectors, n_side):
+    """Per-detector footprint sample points for the refined CCS table.
 
-    Reuses the pipeline's ``ccd_height.compute_ccd_heights`` path (same source,
-    orientation and factor) evaluated at every detector's bbox centre, so the
-    piston is consistent with how the build step applies heights.
+    For each detector, lay an ``n_side`` x ``n_side`` grid across its pixel
+    bounding box and map every node to a field position in the **CCS map
+    frame** (cameraGeom ``FIELD_ANGLE`` with the x<->y transpose the intrinsic
+    maps use, ``thx = FA_y``, ``thy = FA_x``).
+
+    Returns ``{detector_id: dict(thx_deg, thy_deg, pix_x, pix_y, det_name)}``.
+    The pixel coords are kept so the CCD height can be sampled at the very same
+    points (via ``compute_ccd_heights``).
+    """
+    import numpy as np
+    import lsst.geom as geom
+    from lsst.afw.cameraGeom import FIELD_ANGLE, PIXELS
+
+    want = {int(d) for d in detectors}
+    out = {}
+    for det in camera:
+        did = int(det.getId())
+        if did not in want:
+            continue
+        bb = det.getBBox()
+        xs = np.linspace(bb.getMinX(), bb.getMaxX(), n_side)
+        ys = np.linspace(bb.getMinY(), bb.getMaxY(), n_side)
+        gx, gy = (a.ravel() for a in np.meshgrid(xs, ys))
+        tr = det.getTransform(PIXELS, FIELD_ANGLE)
+        fax = np.empty(gx.size)
+        fay = np.empty(gx.size)
+        for i in range(gx.size):
+            p = tr.applyForward(geom.Point2D(float(gx[i]), float(gy[i])))
+            fax[i] = np.degrees(p.getX())
+            fay[i] = np.degrees(p.getY())
+        out[did] = dict(thx_deg=fay, thy_deg=fax, pix_x=gx, pix_y=gy,
+                        det_name=det.getName())
+    return out
+
+
+def _footprint_heights(footprints, camera, source, height_map_dir,
+                       metrology_fits, factor):
+    """Per-point Z4 height (µm) for every footprint sample of every detector.
+
+    Runs the pipeline's ``compute_ccd_heights`` **once** over all points (so the
+    batoid height maps load a single time), then splits the result back per
+    detector.  Returns ``{detector_id: ndarray of Z4_height (µm)}`` aligned with
+    each detector's footprint order.
     """
     import numpy as np
     import pandas as pd
 
     from lsst.ts.intrinsic.wavefront import ccd_height as ch
 
-    ids, rows = [], []
-    for det in camera:
-        c = det.getBBox().getCenter()
-        ids.append(int(det.getId()))
-        rows.append((det.getName(), float(c.getX()), float(c.getY())))
-    df = pd.DataFrame(rows, columns=["detector", "cx", "cy"])
-    # compute_ccd_heights averages the intra- and extra-focal centroids; at a
-    # CCD centre both are the same point.
-    df["centroid_x_intra"] = df["cx"]
-    df["centroid_y_intra"] = df["cy"]
-    df["centroid_x_extra"] = df["cx"]
-    df["centroid_y_extra"] = df["cy"]
+    order = list(footprints)
+    det_names, px, py = [], [], []
+    for did in order:
+        fp = footprints[did]
+        n = fp["pix_x"].size
+        det_names.extend([fp["det_name"]] * n)
+        px.append(fp["pix_x"])
+        py.append(fp["pix_y"])
+    df = pd.DataFrame({"detector": det_names,
+                       "centroid_x_intra": np.concatenate(px),
+                       "centroid_y_intra": np.concatenate(py)})
+    # a footprint node is a single point, so intra == extra centroid there
+    df["centroid_x_extra"] = df["centroid_x_intra"]
+    df["centroid_y_extra"] = df["centroid_y_intra"]
     out = ch.compute_ccd_heights(df, camera, source=source,
                                  height_map_dir=height_map_dir,
                                  metrology_fits=metrology_fits, factor=factor)
     z4 = np.asarray(out["Z4_height"], dtype=float)
-    return {ids[i]: (float(z4[i]) if np.isfinite(z4[i]) else 0.0)
-            for i in range(len(ids))}
+    z4 = np.where(np.isfinite(z4), z4, 0.0)
+    res, pos = {}, 0
+    for did in order:
+        n = footprints[did]["pix_x"].size
+        res[did] = z4[pos:pos + n]
+        pos += n
+    return res
 
 
 def main():
@@ -163,8 +203,6 @@ def main():
                     help="subset of Noll indices (default: all shared by OCS & CCS)")
 
     h = ap.add_argument_group("per-detector CCS heights")
-    h.add_argument("--no-heights", action="store_true",
-                   help="skip the CCD height piston (CCS = smooth camera field only)")
     h.add_argument("--height-source", default="batoid_rubin",
                    choices=["batoid_rubin", "metrology"])
     h.add_argument("--height-map-dir", default=None,
@@ -174,6 +212,17 @@ def main():
                    help="FITS path for the metrology source")
     h.add_argument("--height-to-z4-factor", type=float, default=15.0,
                    help="µm of Z4 per mm of CCD height (default: 15)")
+    h.add_argument("--ccs-footprint-points", type=int, default=50,
+                   help="approx. sample points per detector for the CCS table: "
+                        "a round(sqrt(N)) x round(sqrt(N)) grid across each "
+                        "detector footprint, with the CCD height sampled at "
+                        "each point (preserves intra-CCD height structure). "
+                        "(default: 50)")
+    h.add_argument("--ccs-footprint-min-points", type=int, default=3,
+                   help="if a detector has fewer than this many in-support "
+                        "footprint points (i.e. it sits at the field edge, past "
+                        "the data), store it height-only: Z4 = mean height, "
+                        "camera field zeroed. (default: 3)")
 
     ap.add_argument("--force", action="store_true",
                     help="overwrite an existing <out-root>/<version>/ directory")
@@ -189,23 +238,23 @@ def main():
     print(f"[make_calib_tables] maps: {maps_path}  ({len(maps)} field points, "
           f"Noll {js})")
 
-    # ---- detectors + per-detector Z4 piston ----
-    if args.detectors is not None and args.no_heights:
-        detectors = list(args.detectors)        # no camera needed
-        pistons = {d: 0.0 for d in detectors}
-    else:
-        camera = _get_camera(args.instrument)
-        all_ids = [int(det.getId()) for det in camera]
-        detectors = list(args.detectors) if args.detectors is not None else all_ids
-        if args.no_heights:
-            pistons = {d: 0.0 for d in detectors}
-        else:
-            print(f"[make_calib_tables] computing CCD height pistons "
-                  f"(source={args.height_source}, factor={args.height_to_z4_factor})")
-            pistons = _per_detector_piston_z4(
-                camera, args.height_source, args.height_map_dir,
-                args.metrology_fits, args.height_to_z4_factor)
-            pistons = {d: pistons.get(d, 0.0) for d in detectors}
+    # ---- detectors + per-detector footprint heights ----
+    # Sample the CCD height at an n_side x n_side grid across each detector
+    # footprint, so the intra-CCD height structure is preserved (added to Z4 per
+    # point below).  ``mean_height`` is only used for the height-only field-edge
+    # CCDs, whose footprints fall past the data.
+    camera = _get_camera(args.instrument)
+    all_ids = [int(det.getId()) for det in camera]
+    detectors = list(args.detectors) if args.detectors is not None else all_ids
+    n_side = max(2, int(round(args.ccs_footprint_points ** 0.5)))
+    print(f"[make_calib_tables] sampling CCS footprints "
+          f"({n_side}x{n_side}={n_side * n_side} pts/detector; "
+          f"source={args.height_source}, factor={args.height_to_z4_factor})")
+    footprints = _detector_footprints(camera, detectors, n_side)
+    fp_heights = _footprint_heights(
+        footprints, camera, args.height_source, args.height_map_dir,
+        args.metrology_fits, args.height_to_z4_factor)
+    mean_height = {d: float(fp_heights[d].mean()) for d in detectors}
 
     dest = Path(args.out_root) / args.version
     if dest.exists() and any(dest.iterdir()) and not args.force:
@@ -221,15 +270,36 @@ def main():
 
     # ---- per-detector CCS tables ----
     ccs_files = []
+    n_rows = []
+    fell_back = []
     for det in detectors:
-        ccs = ct.ccs_source_table(maps, detector=det, piston_z4_um=pistons[det],
-                                  noll_list=args.noll_list,
-                                  instrument=args.instrument)
+        fp = footprints[det]
+        ccs = ct.ccs_source_table_on_grid(
+            maps, fp["thx_deg"], fp["thy_deg"],
+            height_z4_um=fp_heights[det], detector=det,
+            noll_list=args.noll_list, instrument=args.instrument)
+        if len(ccs) < args.ccs_footprint_min_points:
+            # field-edge CCD past the data: too few in-support footprint points to
+            # interpolate a camera field, and no measured field exists there.
+            # Store it height-only (Z4 = mean height, camera field zeroed).
+            ccs = ct.ccs_source_table(maps, detector=det,
+                                      piston_z4_um=mean_height[det],
+                                      noll_list=args.noll_list,
+                                      instrument=args.instrument,
+                                      zero_camera_field=True)
+            fell_back.append(det)
         name = f"intrinsic_aberrations_CCS_det{det:03d}.parquet"
         ccs.write(str(dest / name), format="parquet", overwrite=True)
         ccs_files.append(name)
+        n_rows.append(len(ccs))
+    fp_rows = [n for d, n in zip(detectors, n_rows) if d not in fell_back]
     print(f"  wrote {len(ccs_files)} per-detector CCS tables "
-          f"(Z4 piston range {min(pistons.values()):+.4f}..{max(pistons.values()):+.4f} µm)")
+          f"({len(fell_back)} field-edge CCDs stored height-only; footprint "
+          f"pts/detector {min(fp_rows) if fp_rows else 0}.."
+          f"{max(fp_rows) if fp_rows else 0}; mean-height range "
+          f"{min(mean_height.values()):+.4f}..{max(mean_height.values()):+.4f} µm)")
+    if fell_back:
+        print(f"    height-only (camera field zeroed): detectors {fell_back}")
 
     # ---- provenance ----
     prov = dict(
@@ -249,12 +319,12 @@ def main():
         ocs_file=ocs_name,
         ccs_files=ccs_files,
         heights=dict(
-            applied=not args.no_heights,
-            source=(None if args.no_heights else args.height_source),
-            height_map_dir=(None if args.no_heights else args.height_map_dir),
-            metrology_fits=(None if args.no_heights else args.metrology_fits),
+            source=args.height_source,
+            height_map_dir=args.height_map_dir,
+            metrology_fits=args.metrology_fits,
             height_to_z4_factor=args.height_to_z4_factor,
-            piston_z4_um={int(d): round(pistons[d], 6) for d in detectors},
+            ccs_footprint_points=args.ccs_footprint_points,
+            ccs_footprint_fallback_detectors=sorted(int(d) for d in fell_back),
         ),
         maps_meta={k: v for k, v in dict(maps.meta).items()},
     )
