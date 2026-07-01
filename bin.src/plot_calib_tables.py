@@ -108,10 +108,14 @@ def main():
         prov = yaml.safe_load(open(pfile)) or {}
 
     def plot_map(ax, x, y, vals, title, vlim, cmap="RdBu_r"):
+        # Per-sample scatter (no hexbin binning): the OCS/CCS tables already
+        # carry the values on the maps' (thx, thy) grid points, so colour each
+        # sample directly rather than re-aggregating into hex cells.
         v = np.asarray(vals, float)
         fin = np.isfinite(v)
-        tcf = ax.tricontourf(x[fin], y[fin], v[fin],
-                             levels=np.linspace(-vlim, vlim, 21), cmap=cmap, extend="both")
+        sc = ax.scatter(x[fin], y[fin], c=v[fin], s=6,
+                        cmap=cmap, vmin=-vlim, vmax=vlim,
+                        marker="o", linewidths=0.0)
         ax.add_patch(plt.Circle((0, 0), R, fill=False, ec="k", lw=0.6, alpha=0.4))
         ax.set_aspect("equal")
         ax.set_xlim(-R, R)
@@ -119,7 +123,7 @@ def main():
         ax.set_title(title, fontsize=9)
         ax.set_xlabel("x [deg]")
         ax.set_ylabel("y [deg]")
-        return tcf
+        return sc
 
     def vlim_for(*arrays):
         vv = np.concatenate([np.asarray(a, float)[np.isfinite(a)] for a in arrays])
