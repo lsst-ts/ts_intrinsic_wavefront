@@ -746,11 +746,129 @@ def read_donuts_for_visit(parquet_path, day_obs, seq_num):
     return df[(df['day_obs'] == day_obs) & (df['seq_num'] == seq_num)].copy()
 
 
+# ---------------------------------------------------------------------------
+# Per-visit Zernike extraction — shared by the serial and parallel streaming
+# paths.  The expensive part is get_aggregate_zernikes() (Butler dataset
+# reads); everything downstream (quality metrics, column pruning, pyarrow
+# conversion) is pure CPU and safe to run in a worker process.
+# ---------------------------------------------------------------------------
+def _compute_visit_payload(butler, pair, coord_sys, camera,
+                           calc_focal_plane, calc_mean_zernike,
+                           matched_threshold_arcsec, min_donuts_per_detector):
+    """Extract + post-process one visit.
+
+    Returns a picklable payload tuple
+    ``(status, day_obs, seq_num, noll, visit_meta, tbl_pa)`` where ``status``
+    is 'ok' or 'empty'.  Holds no shared state, so it runs unchanged inside a
+    ProcessPoolExecutor worker.
+    """
+    day_obs_val, seq_num = pair
+    agg_zern, visit_meta = get_aggregate_zernikes(
+        butler, day_obs_val, seq_num, coord_sys, camera,
+        calc_focal_plane=calc_focal_plane,
+        calc_mean_zernike=calc_mean_zernike,
+        matched_threshold_arcsec=matched_threshold_arcsec)
+    if agg_zern is None:
+        return ('empty', day_obs_val, seq_num, None, None, None)
+
+    # Per-visit quality metrics computed BEFORE dropping columns, since
+    # `blur` is one of the metrics we care about.
+    visit_meta['n_donuts'] = int(len(agg_zern))
+    if 'detector' in agg_zern.colnames:
+        det_counts = Counter(np.asarray(agg_zern['detector']).tolist())
+        visit_meta['n_detectors'] = int(len(det_counts))
+        visit_meta['n_detectors_with_min_donuts'] = int(sum(
+            1 for c in det_counts.values() if c >= min_donuts_per_detector))
+    else:
+        visit_meta['n_detectors'] = 0
+        visit_meta['n_detectors_with_min_donuts'] = 0
+    if 'blur' in agg_zern.colnames:
+        with np.errstate(invalid='ignore'):
+            visit_meta['median_blur_arcsec'] = float(
+                np.nanmedian(np.asarray(agg_zern['blur'], dtype=float)))
+    else:
+        visit_meta['median_blur_arcsec'] = float('nan')
+
+    # Drop unwanted columns per-visit
+    drop_cols = [c for c in agg_zern.colnames
+                 if '_W' in c or '_N' in c or '_NW' in c
+                 or '_ra_' in c or '_dec_' in c]
+    if drop_cols:
+        agg_zern.remove_columns(drop_cols)
+
+    tbl_pa = _astropy_table_to_pyarrow(agg_zern)
+    noll = visit_meta.get('nollIndices', None)
+    noll = list(noll) if noll is not None else None
+    return ('ok', day_obs_val, seq_num, noll, visit_meta, tbl_pa)
+
+
+# Per-process state for the parallel path.  Each worker builds its own Butler
+# (a Butler is expensive to pickle and must not be shared across processes);
+# the camera is rebuilt from LsstCam's class-level cache.
+_VISIT_WORKER = {}
+
+
+def _init_visit_worker(butler_repo, collections, coord_sys, calc_focal_plane,
+                       calc_mean_zernike, matched_threshold_arcsec,
+                       min_donuts_per_detector):
+    global _VISIT_WORKER
+    _VISIT_WORKER = dict(
+        butler=Butler(butler_repo, instrument='LSSTCam', collections=collections),
+        camera=LsstCam.getCamera(),
+        coord_sys=coord_sys,
+        calc_focal_plane=calc_focal_plane,
+        calc_mean_zernike=calc_mean_zernike,
+        matched_threshold_arcsec=matched_threshold_arcsec,
+        min_donuts_per_detector=min_donuts_per_detector,
+    )
+
+
+def _visit_worker(pair):
+    w = _VISIT_WORKER
+    return _compute_visit_payload(
+        w['butler'], pair, w['coord_sys'], w['camera'],
+        w['calc_focal_plane'], w['calc_mean_zernike'],
+        w['matched_threshold_arcsec'], w['min_donuts_per_detector'])
+
+
+def _parallel_visit_payloads(visit_pairs, workers, init_args):
+    """Yield per-visit payloads from a process pool.
+
+    Keeps at most ~2*workers visits in flight so memory stays bounded, and
+    yields in completion order — row-group order is irrelevant downstream and
+    the noll reference is identical across visits, so order does not matter.
+    A 'spawn' context is used (not fork) to avoid deadlocking on locks held by
+    background threads inside the already-initialised LSST stack.
+    """
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+    ctx = mp.get_context('spawn')
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx,
+                             initializer=_init_visit_worker,
+                             initargs=init_args) as ex:
+        it = iter(visit_pairs)
+        pending = set()
+        for _ in range(max(1, workers * 2)):
+            try:
+                pending.add(ex.submit(_visit_worker, next(it)))
+            except StopIteration:
+                break
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for fut in done:
+                yield fut.result()
+                try:
+                    pending.add(ex.submit(_visit_worker, next(it)))
+                except StopIteration:
+                    pass
+
+
 def stream_zernikes_to_parquet(visit_pairs, collections, butler_repo, coord_sys,
                                camera, output_file,
                                calc_focal_plane=False, calc_mean_zernike=False,
                                matched_threshold_arcsec=DEFAULT_MATCHED_THRESHOLD_ARCSEC,
-                               min_donuts_per_detector=DEFAULT_MIN_DONUTS_PER_DETECTOR):
+                               min_donuts_per_detector=DEFAULT_MIN_DONUTS_PER_DETECTOR,
+                               workers=1):
     """Stream aggregate Zernikes per visit to parquet (one row group per visit).
 
     List/array columns (zk_OCS, zk_intrinsic_OCS, etc.) are stored as
@@ -761,11 +879,12 @@ def stream_zernikes_to_parquet(visit_pairs, collections, butler_repo, coord_sys,
     median_blur_arcsec) are computed from each visit's table and stored
     in the returned visit_info QTable for downstream cuts.
 
+    ``workers`` controls the per-visit extraction parallelism: 1 (default)
+    keeps the original single-process behaviour; >1 fans the Butler reads out
+    over a process pool while the parquet writing stays serial in this process.
+
     Returns visit_info (small QTable), or None on failure.
     """
-    print(f"Initializing Butler with repo={butler_repo}, collections: {collections}")
-    butler = Butler(butler_repo, instrument='LSSTCam', collections=collections)
-
     visit_meta_list = []
     success_count = 0
     error_count = 0
@@ -775,60 +894,50 @@ def stream_zernikes_to_parquet(visit_pairs, collections, butler_repo, coord_sys,
     writer = None
     ref_schema = None
 
-    print(f"\nStreaming Zernikes for {len(visit_pairs)} visits to {output_file}...")
+    n_workers = max(1, int(workers or 1))
+    mode = 'serial' if n_workers == 1 else f'{n_workers} workers'
+    print(f"\nStreaming Zernikes for {len(visit_pairs)} visits to {output_file} "
+          f"({mode})...")
 
     # Overwrite existing file
     if Path(output_file).exists():
         Path(output_file).unlink()
 
+    # Build the per-visit payload source: a single-process generator or a
+    # bounded process pool.  Both yield identical payload tuples, so the
+    # writer loop below is shared.
+    if n_workers == 1:
+        print(f"Initializing Butler with repo={butler_repo}, "
+              f"collections: {collections}")
+        butler = Butler(butler_repo, instrument='LSSTCam', collections=collections)
+        payloads = (
+            _compute_visit_payload(
+                butler, pair, coord_sys, camera, calc_focal_plane,
+                calc_mean_zernike, matched_threshold_arcsec,
+                min_donuts_per_detector)
+            for pair in visit_pairs)
+    else:
+        init_args = (butler_repo, collections, coord_sys, calc_focal_plane,
+                     calc_mean_zernike, matched_threshold_arcsec,
+                     min_donuts_per_detector)
+        payloads = _parallel_visit_payloads(visit_pairs, n_workers, init_args)
+
     try:
-        for day_obs_val, seq_num in tqdm(visit_pairs):
-            agg_zern, visit_meta = get_aggregate_zernikes(
-                butler, day_obs_val, seq_num, coord_sys, camera,
-                calc_focal_plane=calc_focal_plane,
-                calc_mean_zernike=calc_mean_zernike,
-                matched_threshold_arcsec=matched_threshold_arcsec)
-            if agg_zern is None:
+        for status, day_obs_val, seq_num, noll, visit_meta, tbl_pa in tqdm(
+                payloads, total=len(visit_pairs)):
+            if status != 'ok':
                 error_count += 1
                 continue
 
-            noll = visit_meta.get('nollIndices', None)
             if noll is not None:
                 if ref_noll_indices is None:
-                    ref_noll_indices = list(noll)
-                elif list(noll) != ref_noll_indices:
+                    ref_noll_indices = noll
+                elif noll != ref_noll_indices:
                     print(f"WARNING: nollIndices mismatch for day_obs={day_obs_val}, "
-                          f"seq_num={seq_num}: {list(noll)} != {ref_noll_indices} — skipping")
+                          f"seq_num={seq_num}: {noll} != {ref_noll_indices} — skipping")
                     noll_mismatch_count += 1
                     error_count += 1
                     continue
-
-            # Per-visit quality metrics computed BEFORE dropping columns,
-            # since `blur` is one of the metrics we care about.
-            visit_meta['n_donuts'] = int(len(agg_zern))
-            if 'detector' in agg_zern.colnames:
-                det_counts = Counter(np.asarray(agg_zern['detector']).tolist())
-                visit_meta['n_detectors'] = int(len(det_counts))
-                visit_meta['n_detectors_with_min_donuts'] = int(sum(
-                    1 for c in det_counts.values() if c >= min_donuts_per_detector))
-            else:
-                visit_meta['n_detectors'] = 0
-                visit_meta['n_detectors_with_min_donuts'] = 0
-            if 'blur' in agg_zern.colnames:
-                with np.errstate(invalid='ignore'):
-                    visit_meta['median_blur_arcsec'] = float(
-                        np.nanmedian(np.asarray(agg_zern['blur'], dtype=float)))
-            else:
-                visit_meta['median_blur_arcsec'] = float('nan')
-
-            # Drop unwanted columns per-visit
-            drop_cols = [c for c in agg_zern.colnames
-                         if '_W' in c or '_N' in c or '_NW' in c
-                         or '_ra_' in c or '_dec_' in c]
-            if drop_cols:
-                agg_zern.remove_columns(drop_cols)
-
-            tbl_pa = _astropy_table_to_pyarrow(agg_zern)
 
             if writer is None:
                 ref_schema = tbl_pa.schema
@@ -847,7 +956,7 @@ def stream_zernikes_to_parquet(visit_pairs, collections, butler_repo, coord_sys,
             writer.write_table(tbl_pa)  # one row group per visit
             visit_meta_list.append(visit_meta)
             success_count += 1
-            total_rows += len(agg_zern)
+            total_rows += visit_meta['n_donuts']
     finally:
         if writer is not None:
             writer.close()
@@ -2095,6 +2204,7 @@ async def run_mktable(
     min_donuts_per_detector=DEFAULT_MIN_DONUTS_PER_DETECTOR,
     min_detectors_per_visit=DEFAULT_MIN_DETECTORS_PER_VISIT,
     max_median_blur_arcsec=DEFAULT_MAX_MEDIAN_BLUR_ARCSEC,
+    workers=1,
     # Legacy support
     prefix=None,
 ):
@@ -2223,7 +2333,8 @@ async def run_mktable(
         calc_focal_plane=calc_focal_plane,
         calc_mean_zernike=calc_mean_zernike,
         matched_threshold_arcsec=matched_threshold_arcsec,
-        min_donuts_per_detector=min_donuts_per_detector)
+        min_donuts_per_detector=min_donuts_per_detector,
+        workers=workers)
     if visit_info is None:
         return None, None
 

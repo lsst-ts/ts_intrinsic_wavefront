@@ -85,6 +85,11 @@ def main():
     parser.add_argument('--overwrite', action='store_true',
                         help='Overwrite existing output parquet files '
                              '(default: refuse to clobber)')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='Number of worker processes for per-visit Zernike '
+                             'extraction (default 1 = serial). Butler reads are '
+                             'fanned out over a process pool; parquet writing '
+                             'stays serial.')
 
     # Per-visit quality cut configuration
     parser.add_argument('--matched-threshold-arcsec', type=float, default=0.0,
@@ -174,6 +179,7 @@ def main():
         min_donuts_per_detector=args.min_donuts_per_detector,
         min_detectors_per_visit=_none_if_disabled(args.min_detectors_per_visit),
         max_median_blur_arcsec=_none_if_disabled(args.max_median_blur_arcsec),
+        workers=args.workers,
     ))
 
 
