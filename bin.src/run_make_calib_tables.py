@@ -28,7 +28,10 @@ in µm) and writes, under ``<out-root>/<version>/``:
 * ``intrinsic_aberrations_OCS.parquet`` — the telescope-fixed intrinsics, the
   full focal-plane map.  Written **once**: it is detector- and
   filter-independent (the OCS query point is rotated by the rotator, so each
-  detector needs the whole map).
+  detector needs the whole map).  With ``--fill-ocs-from-batoid`` the Noll
+  indices the MIW never measured are backfilled here from the batoid design
+  intrinsic (Rubin v3.14) on the same grid; their CCS camera field is left
+  empty (zero), keeping OCS and CCS on the identical Noll set ip_isr requires.
 * ``intrinsic_aberrations_CCS_det<NNN>.parquet`` — one **per detector**: the
   smooth camera field ``C`` sampled on a grid of points across the CCD footprint,
   with the CCD focal-plane height (``ccd_height``; 15 µm/mm) added to ``Z4`` at
@@ -202,6 +205,29 @@ def main():
     ap.add_argument("--noll-list", type=int, nargs="+", default=None,
                     help="subset of Noll indices (default: all shared by OCS & CCS)")
 
+    b = ap.add_argument_group(
+        "OCS backfill from the batoid optical model",
+        "Fill Noll indices the MIW never measured with the batoid design "
+        "intrinsic (OCS only; the CCS camera field for those is left empty). "
+        "The design intrinsic is evaluated on the SAME field grid as the OCS "
+        "table (the maps' thx/thy points).")
+    b.add_argument("--fill-ocs-from-batoid", action="store_true",
+                   help="enable the batoid OCS backfill")
+    b.add_argument("--batoid-optical-model", default="Rubin_v3.14",
+                   help="batoid yaml stem: 'Rubin_v3.14' -> Rubin_v3.14_<band>.yaml "
+                        "(latest as-built, default); 'LSST' -> nominal design")
+    b.add_argument("--batoid-band", default="i",
+                   help="band whose wavelength sets the design intrinsic; the OCS "
+                        "table is filter-independent so one band is chosen "
+                        "(default: i, the MIW measurement band)")
+    b.add_argument("--batoid-fill-jmax", type=int, default=78,
+                   help="fill every missing Noll in 4..JMAX (default: 78); "
+                        "ignored if --batoid-fill-noll is given")
+    b.add_argument("--batoid-fill-noll", type=int, nargs="+", default=None,
+                   help="explicit Noll indices to backfill (overrides "
+                        "--batoid-fill-jmax); only those absent from the maps "
+                        "are added")
+
     h = ap.add_argument_group("per-detector CCS heights")
     h.add_argument("--height-source", default="batoid_rubin",
                    choices=["batoid_rubin", "metrology"])
@@ -232,6 +258,27 @@ def main():
     if not maps_path.exists():
         sys.exit(f"ERROR: maps not found: {maps_path}")
     maps = Table.read(str(maps_path), format="parquet")
+
+    # ---- optional OCS backfill from the batoid design intrinsic ----
+    # Add Z{j}_OCS (batoid design, on the maps grid) + zero Z{j}_CCS for every
+    # requested Noll the MIW never measured, so the downstream OCS/CCS builders
+    # pick them up as ordinary shared-Noll columns (CCS left empty for them).
+    backfilled = []
+    if args.fill_ocs_from_batoid:
+        from lsst.ts.intrinsic.wavefront import batoid_intrinsic as bi
+        fill_noll = (args.batoid_fill_noll if args.batoid_fill_noll is not None
+                     else list(range(4, args.batoid_fill_jmax + 1)))
+        jmax = (max(fill_noll) if args.batoid_fill_noll is not None
+                else args.batoid_fill_jmax)
+        print(f"[make_calib_tables] batoid OCS backfill: model "
+              f"{args.batoid_optical_model}, band {args.batoid_band}, "
+              f"candidate Noll {min(fill_noll)}..{max(fill_noll)}")
+        maps, backfilled = bi.backfill_ocs_from_batoid(
+            maps, fill_noll, band=args.batoid_band,
+            optical_model=args.batoid_optical_model, jmax=jmax)
+        print(f"  filled {len(backfilled)} missing Noll from batoid (CCS zeroed): "
+              f"{backfilled}")
+
     js = ct.maps_noll_indices(maps)
     if args.noll_list is not None:
         js = [j for j in args.noll_list if j in js]
@@ -318,6 +365,8 @@ def main():
         noll_indices=[int(j) for j in js],
         ocs_file=ocs_name,
         ccs_files=ccs_files,
+        batoid_ocs_backfill=(dict(maps.meta["batoid_ocs_backfill"])
+                             if backfilled else None),
         heights=dict(
             source=args.height_source,
             height_map_dir=args.height_map_dir,
