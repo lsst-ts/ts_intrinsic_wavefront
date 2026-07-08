@@ -41,9 +41,12 @@ def main():
                              'keep visits with n_detectors_with_min_donuts >= this, '
                              'relaxing ONLY the CCD-count cut (n_donuts/blur cuts '
                              'unchanged) and bypassing the precomputed '
-                             'visit_quality_pass. Default: None (unchanged behavior). '
-                             'Used by the bounce analysis to recover marginal '
-                             'low-CCD visits.')
+                             'visit_quality_pass. Default: None (unchanged behavior).')
+    parser.add_argument('--no-quality-cut', action='store_true',
+                        help='Fit EVERY visit and apply no per-visit quality cut here; '
+                             'the metric columns still travel in the output so each '
+                             'consumer can cut as needed ("fit all, cut at use"). '
+                             'Default: off (unchanged behavior).')
 
     args = parser.parse_args()
 
@@ -56,6 +59,7 @@ def main():
         visits_file=args.visits,
         intrinsic_sidecar=args.intrinsic_sidecar,
         min_detectors=args.min_detectors,
+        no_quality_cut=args.no_quality_cut,
     )
 
 
