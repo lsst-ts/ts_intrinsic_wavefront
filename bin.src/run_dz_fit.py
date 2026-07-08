@@ -36,6 +36,14 @@ def main():
                         help='Flag fits with |coeff| > threshold μm (default: 2.0)')
     parser.add_argument('--min-donuts', type=int, default=200,
                         help='Flag fits with fewer donuts (default: 200)')
+    parser.add_argument('--min-detectors', type=int, default=None,
+                        help='Opt-in override of the per-visit quality selection: '
+                             'keep visits with n_detectors_with_min_donuts >= this, '
+                             'relaxing ONLY the CCD-count cut (n_donuts/blur cuts '
+                             'unchanged) and bypassing the precomputed '
+                             'visit_quality_pass. Default: None (unchanged behavior). '
+                             'Used by the bounce analysis to recover marginal '
+                             'low-CCD visits.')
 
     args = parser.parse_args()
 
@@ -47,6 +55,7 @@ def main():
         min_donuts=args.min_donuts,
         visits_file=args.visits,
         intrinsic_sidecar=args.intrinsic_sidecar,
+        min_detectors=args.min_detectors,
     )
 
 
