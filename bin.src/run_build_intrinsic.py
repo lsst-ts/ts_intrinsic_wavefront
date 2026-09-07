@@ -123,6 +123,7 @@ def main():
     allowed_bands = mc.as_band_list(cfg.get('filter'))
     programs = cfg.get('programs')
     alt_min, alt_max = cfg.get('alt_min_deg'), cfg.get('alt_max_deg')
+    day_obs_min, day_obs_max = cfg.get('day_obs_min'), cfg.get('day_obs_max')
     rot_min, rot_max = args.rot_min, args.rot_max
     max_visits = b.get('max_visits')
     ofc_norm_yaml = b.get('ofc_normalization_yaml')
@@ -150,7 +151,8 @@ def main():
     visits_full = QTable.read(str(base / 'visits.parquet'))
     visits_kept = apply_visit_filters(
         visits_full, alt_min_deg=alt_min, alt_max_deg=alt_max,
-        rotator_min_deg=rot_min, rotator_max_deg=rot_max)
+        rotator_min_deg=rot_min, rotator_max_deg=rot_max,
+        day_obs_min=day_obs_min, day_obs_max=day_obs_max)
     visits_kept = filter_visits_by_band(visits_kept, allowed_bands)
     visits_kept = filter_visits_by_program(visits_kept, programs)
     if max_visits and len(visits_kept) > max_visits:
@@ -158,7 +160,8 @@ def main():
             np.linspace(0, len(visits_kept) - 1, max_visits)).astype(int))
         visits_kept = visits_kept[idx]
     print(f'  visits kept: {len(visits_kept)}/{len(visits_full)} '
-          f'(bands={allowed_bands}, programs={programs}, alt=[{alt_min},{alt_max}])')
+          f'(bands={allowed_bands}, programs={programs}, alt=[{alt_min},{alt_max}], '
+          f'day_obs=[{day_obs_min},{day_obs_max}])')
     if len(visits_kept) == 0:
         raise RuntimeError('No visits pass the filters for this bin.')
 

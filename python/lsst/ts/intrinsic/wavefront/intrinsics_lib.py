@@ -1575,6 +1575,59 @@ async def get_m1m3_gradients(efd_client, visit_table):
     return df[['x_gradient', 'y_gradient', 'z_gradient', 'radial_gradient']]
 
 
+def _thermal_from_consdb_transform(consdb_client, unique_visits):
+    """ESS air temps (+delta-Ts) and TMA truss from the ConsDB transformed EFD.
+
+    One bulk query on ``efd_lsstcam.exposure_efd`` (per-exposure means) keyed by
+    ``exposure_id``, replacing the per-visit ESS/truss EFD loops (which do
+    ~4 + 2 EFD round-trips per visit).  Returns ``(temp_df, truss_df)`` keyed on
+    ``(day_obs, seq_num)``, or ``(None, None)`` if the ``exposure_id`` link or the
+    transform columns are unavailable -- the caller then falls back to the raw-EFD
+    per-visit path.  M1M3 gradients are NOT here (the thermocouple array is not in
+    the transform); those stay on the raw-EFD per-day path.
+    """
+    if ('exposure_id' not in unique_visits
+            or unique_visits['exposure_id'].isna().all()):
+        return None, None
+    tmap = {"mt_salindex111_temperature_0_mean": "cam_air_temp",
+            "mt_salindex112_temperature_0_mean": "m2_air_temp",
+            "mt_salindex113_temperature_0_mean": "m1m3_air_temp",
+            "mt_salindex301_temperature_0_mean": "outside_temp"}
+    trmap = {"mt_salindex122_temperature_6": "tma_truss_temp_pxpy",
+             "mt_salindex122_temperature_7": "tma_truss_temp_mxmy"}
+    v = unique_visits.dropna(subset=['exposure_id']).copy()
+    v['exposure_id'] = v['exposure_id'].astype('int64')
+    ids = list(dict.fromkeys(v['exposure_id'].tolist()))
+    cols = list(tmap) + list(trmap)
+    frames = []
+    try:
+        for i in range(0, len(ids), 800):
+            idlist = ", ".join(str(x) for x in ids[i:i + 800])
+            q = (f"SELECT exposure_id, {', '.join(cols)} "
+                 f"FROM efd_lsstcam.exposure_efd WHERE exposure_id IN ({idlist})")
+            frames.append(consdb_client.query(q).to_pandas())
+    except Exception as e:
+        print(f"  ConsDB transform temps query failed ({type(e).__name__}: {e})")
+        return None, None
+    if not frames or sum(len(f) for f in frames) == 0:
+        return None, None
+    df = pd.concat(frames, ignore_index=True).drop_duplicates('exposure_id')
+    m = v[['day_obs', 'seq_num', 'exposure_id']].merge(df, on='exposure_id', how='left')
+    for c in cols:
+        if c in m:
+            m[c] = pd.to_numeric(m[c], errors='coerce')
+    temp_df = m[['day_obs', 'seq_num']].copy()
+    for src, name in tmap.items():
+        temp_df[name] = m[src] if src in m else np.nan
+    temp_df["m2_delta_t"] = temp_df["m2_air_temp"] - temp_df["m1m3_air_temp"]
+    temp_df["cam_m1m3_delta_t"] = temp_df["cam_air_temp"] - temp_df["m1m3_air_temp"]
+    temp_df["dome_delta_t"] = temp_df["outside_temp"] - temp_df["m1m3_air_temp"]
+    truss_df = m[['day_obs', 'seq_num']].copy()
+    for src, name in trmap.items():
+        truss_df[name] = m[src] if src in m else np.nan
+    return temp_df, truss_df
+
+
 async def get_thermal_data(consdb_client, efd_client, visit_info,
                            temp_time_window_sec=DEFAULT_TEMP_TIME_WINDOW_SEC):
     """Retrieve all thermal data for visits and return as a DataFrame.
@@ -1589,7 +1642,7 @@ async def get_thermal_data(consdb_client, efd_client, visit_info,
     day_obs_str = ", ".join(str(d) for d in day_obs_list)
 
     query = f"""
-        SELECT e.day_obs, e.seq_num, e.obs_start, e.obs_end
+        SELECT e.day_obs, e.seq_num, e.exposure_id, e.obs_start, e.obs_end
         FROM cdb_lsstcam.exposure e
         WHERE e.day_obs IN ({day_obs_str})
         ORDER BY e.day_obs, e.seq_num
@@ -1603,13 +1656,15 @@ async def get_thermal_data(consdb_client, efd_client, visit_info,
         'seq_num': np.array(visit_info['seq_num']),
     })
     vi_df = vi_df.merge(
-        consdb_df[['day_obs', 'seq_num', 'obs_start', 'obs_end']],
+        consdb_df[['day_obs', 'seq_num', 'exposure_id', 'obs_start', 'obs_end']],
         on=['day_obs', 'seq_num'], how='left',
     )
     n_matched = vi_df['obs_start'].notna().sum()
     print(f"Matched obs times for {n_matched}/{len(vi_df)} visits")
 
-    # ESS temperatures
+    # ESS air temps + TMA truss -- fast bulk read from the ConsDB transformed EFD
+    # (efd_lsstcam.exposure_efd per-exposure means), with the per-visit raw-EFD
+    # loops kept as a fallback for time ranges the transform doesn't cover.
     ess_sensors = {
         "cam_air_temp": 111,
         "m2_air_temp": 112,
@@ -1618,25 +1673,30 @@ async def get_thermal_data(consdb_client, efd_client, visit_info,
     }
 
     valid = vi_df.dropna(subset=['obs_start', 'obs_end']).copy()
-    unique_visits = valid[['day_obs', 'seq_num', 'obs_start', 'obs_end']].drop_duplicates()
-    print(f"Querying EFD temperatures for {len(unique_visits)} visits...")
+    ucols = ['day_obs', 'seq_num', 'obs_start', 'obs_end']
+    if 'exposure_id' in valid:
+        ucols = ucols + ['exposure_id']
+    unique_visits = valid[ucols].drop_duplicates()
 
-    temp_records = []
-    for _, row in tqdm(unique_visits.iterrows(), total=len(unique_visits)):
-        record = {"day_obs": row["day_obs"], "seq_num": row["seq_num"]}
-        for name, index in ess_sensors.items():
-            record[name] = await get_ess_temperature(
-                efd_client, row["obs_start"], row["obs_end"], index,
-                post_padding=temp_time_window_sec,
-            )
-        temp_records.append(record)
-
-    temp_df = pd.DataFrame(temp_records)
-
-    # Delta-T quantities
-    temp_df["m2_delta_t"] = temp_df["m2_air_temp"] - temp_df["m1m3_air_temp"]
-    temp_df["cam_m1m3_delta_t"] = temp_df["cam_air_temp"] - temp_df["m1m3_air_temp"]
-    temp_df["dome_delta_t"] = temp_df["outside_temp"] - temp_df["m1m3_air_temp"]
+    temp_df, truss_df = _thermal_from_consdb_transform(consdb_client, unique_visits)
+    if temp_df is not None:
+        print(f"ESS temps + TMA truss from ConsDB transform for {len(temp_df)} visits")
+    else:
+        print(f"Querying EFD temperatures for {len(unique_visits)} visits "
+              f"(per-visit fallback)...")
+        temp_records = []
+        for _, row in tqdm(unique_visits.iterrows(), total=len(unique_visits)):
+            record = {"day_obs": row["day_obs"], "seq_num": row["seq_num"]}
+            for name, index in ess_sensors.items():
+                record[name] = await get_ess_temperature(
+                    efd_client, row["obs_start"], row["obs_end"], index,
+                    post_padding=temp_time_window_sec,
+                )
+            temp_records.append(record)
+        temp_df = pd.DataFrame(temp_records)
+        temp_df["m2_delta_t"] = temp_df["m2_air_temp"] - temp_df["m1m3_air_temp"]
+        temp_df["cam_m1m3_delta_t"] = temp_df["cam_air_temp"] - temp_df["m1m3_air_temp"]
+        temp_df["dome_delta_t"] = temp_df["outside_temp"] - temp_df["m1m3_air_temp"]
 
     for col in ess_sensors:
         n_valid = temp_df[col].notna().sum()
@@ -1669,23 +1729,23 @@ async def get_thermal_data(consdb_client, efd_client, visit_info,
     # NaN, which is what we want.
     gradient_df = pd.concat(gradient_parts, ignore_index=True, sort=False)
 
-    # TMA truss temperatures
-    truss_sensors = {
-        "tma_truss_temp_pxpy": ("temperatureItem6", 122),
-        "tma_truss_temp_mxmy": ("temperatureItem7", 122),
-    }
-
-    truss_records = []
-    print(f"Querying TMA truss temperatures...")
-    for _, row in tqdm(unique_visits.iterrows(), total=len(unique_visits)):
-        record = {"day_obs": row["day_obs"], "seq_num": row["seq_num"]}
-        for name, (field, index) in truss_sensors.items():
-            record[name] = await get_ess_temperature(
-                efd_client, row["obs_start"], row["obs_end"], index,
-                field=field, post_padding=temp_time_window_sec,
-            )
-        truss_records.append(record)
-    truss_df = pd.DataFrame(truss_records)
+    # TMA truss temperatures (skip if the ConsDB transform already supplied them)
+    if truss_df is None:
+        truss_sensors = {
+            "tma_truss_temp_pxpy": ("temperatureItem6", 122),
+            "tma_truss_temp_mxmy": ("temperatureItem7", 122),
+        }
+        truss_records = []
+        print(f"Querying TMA truss temperatures (per-visit fallback)...")
+        for _, row in tqdm(unique_visits.iterrows(), total=len(unique_visits)):
+            record = {"day_obs": row["day_obs"], "seq_num": row["seq_num"]}
+            for name, (field, index) in truss_sensors.items():
+                record[name] = await get_ess_temperature(
+                    efd_client, row["obs_start"], row["obs_end"], index,
+                    field=field, post_padding=temp_time_window_sec,
+                )
+            truss_records.append(record)
+        truss_df = pd.DataFrame(truss_records)
 
     # Merge all thermal data
     thermal_df = temp_df.merge(gradient_df, on=["day_obs", "seq_num"], how="left")

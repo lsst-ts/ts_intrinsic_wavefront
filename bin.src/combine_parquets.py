@@ -113,8 +113,28 @@ def main():
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
 
+    # Drop 0-row sentinels (e.g. nights with no AOS products write an empty
+    # marker so the DAG completes) BEFORE schema unification — otherwise their
+    # minimal schema would shrink the common-column intersection to nothing.
+    nonempty = []
+    for p in args.inputs:
+        pf = pq.ParquetFile(p)
+        if pf.metadata.num_rows == 0:
+            print(f'  note: skipping empty input {p} (0 rows)')
+        else:
+            nonempty.append((p, pf))
+    if not nonempty:
+        # Everything empty: write a valid 0-row file so the target exists.
+        pf0 = pq.ParquetFile(args.inputs[0])
+        pq.ParquetWriter(args.output, pf0.schema_arrow,
+                         compression='snappy').close()
+        print(f'combined {len(args.inputs)} files -> {args.output}: 0 rows '
+              f'(all inputs empty)')
+        return
+    paths = [p for p, _ in nonempty]
+    pfs = [pf for _, pf in nonempty]
+
     # Pass 1: schemas -> unified (common, reconcilable) schema.
-    pfs = [pq.ParquetFile(p) for p in args.inputs]
     schemas = [pf.schema_arrow for pf in pfs]
     unified, dropped = build_unified_schema(schemas)
 
@@ -130,7 +150,7 @@ def main():
     writer = pq.ParquetWriter(args.output, unified, compression='snappy')
     total_rows = 0
     try:
-        for p, pf in zip(args.inputs, pfs):
+        for p, pf in zip(paths, pfs):
             for i in range(pf.num_row_groups):
                 tbl = conform_table(pf.read_row_group(i), unified)
                 writer.write_table(tbl)
@@ -140,7 +160,7 @@ def main():
     finally:
         writer.close()
 
-    print(f'combined {len(args.inputs)} files -> {args.output}: {total_rows} rows '
+    print(f'combined {len(paths)} files -> {args.output}: {total_rows} rows '
           f'({len(unified.names)} columns, {len(dropped)} dropped)')
 
 

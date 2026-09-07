@@ -540,7 +540,8 @@ def flag_bad_fits(fit_table, prefix, threshold=2.0, min_donuts=200):
 def run_double_zernike_fits(input_file, coord_sys='OCS',
                             output_file=None, bad_fit_threshold=2.0,
                             min_donuts=200, visits_file=None,
-                            intrinsic_sidecar=None):
+                            intrinsic_sidecar=None, min_detectors=None,
+                            no_quality_cut=False):
     """Run the full Double Zernike fitting pipeline.
 
     Loads input HDF5 (donuts + visits tables), derives Noll indices,
@@ -560,6 +561,22 @@ def run_double_zernike_fits(input_file, coord_sys='OCS',
         Flag fits with |coefficient| > this (μm). Default 2.0.
     min_donuts : int
         Flag fits with fewer donuts than this. Default 200.
+    min_detectors : int or None
+        Opt-in override of the per-visit quality selection.  When None (default)
+        behavior is unchanged — the precomputed ``visit_quality_pass`` column is
+        used as-is (or ``quality_visit_mask`` with default thresholds).  When set,
+        the mask is recomputed from the metric columns with
+        ``min_detectors_per_visit=min_detectors``, relaxing ONLY the
+        ``n_detectors_with_min_donuts`` cut (the n_donuts / blur cuts keep their
+        defaults) and bypassing the precomputed flag (which is fixed at 170).
+        Used by the bounce analysis to recover marginal low-CCD visits; leave
+        None for the MIW calibration and all other outputs.
+    no_quality_cut : bool
+        If True, fit EVERY visit and apply no per-visit quality cut here — the
+        metric columns (n_detectors_with_min_donuts, median_blur_arcsec,
+        visit_quality_pass) still travel in the output so each consumer can cut
+        as it needs ("fit all, cut at use").  Default False (unchanged behavior).
+        Takes precedence over min_detectors / visit_quality_pass.
 
     Returns
     -------
@@ -598,7 +615,24 @@ def run_double_zernike_fits(input_file, coord_sys='OCS',
 
     # Apply per-visit quality cuts (n_donuts, n_detectors, median_blur_arcsec)
     # if those columns are present (mktable >= 2026-05-06).
-    if 'visit_quality_pass' in visit_info.colnames:
+    if no_quality_cut:
+        # Fit all visits; cuts are applied downstream at each consumer. The
+        # metric columns still travel in the output for that filtering.
+        print(f"  --no-quality-cut: keeping all {len(visit_info)} visits "
+              f"(per-visit cuts applied downstream)")
+    elif min_detectors is not None:
+        # Opt-in override (bounce): recompute the mask from the metric columns,
+        # relaxing ONLY the CCD-count cut to `min_detectors` and keeping the
+        # standard n_donuts / blur cuts.  Deliberately bypasses the precomputed
+        # visit_quality_pass (fixed at min_detectors=170) so this DOES NOT change
+        # the default path used by MIW calibration and every other output.
+        from lsst.ts.intrinsic.wavefront.intrinsics_lib import quality_visit_mask
+        keep = quality_visit_mask(visit_info, min_detectors_per_visit=min_detectors,
+                                  verbose=True)
+        print(f"  Per-visit quality cuts (min_detectors={min_detectors} override): "
+              f"{int(keep.sum())}/{len(visit_info)} visits pass")
+        visit_info = visit_info[keep]
+    elif 'visit_quality_pass' in visit_info.colnames:
         keep = np.asarray(visit_info['visit_quality_pass'], dtype=bool)
         n_pass = int(keep.sum())
         print(f"  Applying per-visit quality cuts: "
