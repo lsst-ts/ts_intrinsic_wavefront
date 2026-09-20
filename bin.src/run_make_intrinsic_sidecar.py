@@ -63,6 +63,14 @@ def main():
                          'wfs/donuts.parquet to build a corner-WFS MIW sidecar')
     ap.add_argument('--output', default=None,
                     help='sidecar output path (default <mi>/zk_intrinsic.parquet)')
+    # The caller (the Snakefile) owns the output layout and may name this
+    # directory differently from the mi_name key.
+    ap.add_argument('--mi-dir', default=None,
+                    help='Dir holding intrinsic_split_decomp.parquet '
+                         '(default: output/<ps>/<mi>)')
+    ap.add_argument('--tables-dir', default=None,
+                    help='Dir holding the phase-1 donuts/visits.parquet '
+                         '(default: output/<ps>)')
     ap.add_argument('--wfs-corner-height', action='store_true',
                     help='corner-WFS Z4 height = mean(h(SW1,intra), h(SW0,extra)) — the two '
                          'correct half-sensors — instead of both centroids on one detector')
@@ -73,8 +81,9 @@ def main():
                             config_path=(Path(args.config) if args.config else None))
     b = cfg.get('build', {})
     coord = cfg.get('coord_sys', args.coord_sys)
-    base = Path(args.output_root) / args.param_set
-    mi_dir = base / args.mi_name
+    ps_base = Path(args.output_root) / args.param_set
+    base = Path(args.tables_dir) if args.tables_dir else ps_base
+    mi_dir = Path(args.mi_dir) if args.mi_dir else ps_base / args.mi_name
 
     # ---- decomposition (step 2): all-parquet astropy Table ----
     # One row per (j, part); O/C complex polar fields are flattened to

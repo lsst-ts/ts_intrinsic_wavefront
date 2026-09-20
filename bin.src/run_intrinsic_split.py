@@ -57,6 +57,20 @@ def main():
     ap.add_argument('--mi-name', required=True)
     ap.add_argument('--config', default=None)
     ap.add_argument('--output-root', default='output')
+    # Explicit path overrides.  The caller (the Snakefile) owns the output
+    # layout and may name directories differently from the param_set / mi_name
+    # keys, so each of the three paths this runner needs can be supplied
+    # directly rather than derived from those keys.
+    ap.add_argument('--out-dir', default=None,
+                    help='This entry\'s output dir '
+                         '(default: output/<ps>/<mi>)')
+    ap.add_argument('--src-dir', default=None,
+                    help='Dir holding the build grids to read; differs from '
+                         '--out-dir only for a build_from entry '
+                         '(default: output/<ps>/<build_source>)')
+    ap.add_argument('--fits', default=None,
+                    help='Phase-1 fits.parquet '
+                         '(default: output/<ps>/fits.parquet)')
     args = ap.parse_args()
 
     cfg = mc.load_mi_config(args.param_set, args.mi_name,
@@ -82,8 +96,10 @@ def main():
     # Read the per-rotator-bin grids from the BUILD SOURCE entry (build_from lets
     # a derived entry reuse a parent's already-built grids — no rebuild).
     src_mi = mc.build_source(cfg, args.mi_name)
-    base = Path(args.output_root) / args.param_set / args.mi_name
-    src_base = Path(args.output_root) / args.param_set / src_mi
+    base = (Path(args.out_dir) if args.out_dir
+            else Path(args.output_root) / args.param_set / args.mi_name)
+    src_base = (Path(args.src_dir) if args.src_dir
+                else Path(args.output_root) / args.param_set / src_mi)
     if src_mi != args.mi_name:
         print(f'[intrinsic_split] reading build grids from source mi={src_mi!r}')
         # the bins we decompose must have been built by the source entry
@@ -93,7 +109,8 @@ def main():
         if extra:
             raise ValueError(f'build_from={src_mi!r}: rotator bins {sorted(extra)} are not '
                              f'among the source entry\'s built bins')
-    fits_path = Path(args.output_root) / args.param_set / 'fits.parquet'
+    fits_path = (Path(args.fits) if args.fits
+                 else Path(args.output_root) / args.param_set / 'fits.parquet')
     fits_table = (pd.read_parquet(fits_path,
                                   columns=['rotator_angle', 'alt', 'day_obs', 'seq_num'])
                   if fits_path.exists() else None)

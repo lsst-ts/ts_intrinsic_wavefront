@@ -87,6 +87,30 @@ def rotator_bins(cfg):
     return [(float(lo), float(hi)) for lo, hi in cfg['rotator_bins']]
 
 
+def dir_name(cfg, mi_name):
+    """The short directory name this entry's output is written under.
+
+    Decouples the directory component from the entry identity: ``mi_name``
+    stays the key that ``--mi-name`` and the config resolve against, while
+    an optional ``dir_name`` supplies a shorter string for the output path.
+    Absent -> the ``mi_name`` itself, so an entry already short enough
+    needs no ``dir_name``.
+
+    Parameters
+    ----------
+    cfg : `dict`
+        Merged config for one (param_set, mi_name), from `load_mi_config`.
+    mi_name : `str`
+        The entry name, used as the fallback.
+
+    Returns
+    -------
+    dir_name : `str`
+        Filename-safe directory component.
+    """
+    return cfg.get('dir_name') or mi_name
+
+
 def build_source(cfg, mi_name):
     """The mi_name whose build grids this entry's split should read.
 

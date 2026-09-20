@@ -103,6 +103,12 @@ def main():
     ap.add_argument('--out-dir', default=None,
                     help='Explicit output dir (default: '
                          'output/<ps>/<mi>/build/rot_<lo>_<hi>)')
+    # The caller (the Snakefile) owns the output layout and may name
+    # directories differently from the param_set key, so the phase-1 table
+    # location can be given directly instead of being derived from it.
+    ap.add_argument('--tables-dir', default=None,
+                    help='Dir holding the phase-1 donuts/visits.parquet '
+                         '(default: output/<ps>)')
     args = ap.parse_args()
 
     cfg = mc.load_mi_config(args.param_set, args.mi_name,
@@ -135,13 +141,14 @@ def main():
     n_radial_bins_azimuth = int(b.get('n_radial_bins_azimuth', 4))
     azimuth_bin_deg = float(b.get('azimuth_bin_deg', 15.0))
 
-    base = Path(args.output_root) / args.param_set
+    ps_base = Path(args.output_root) / args.param_set
+    base = Path(args.tables_dir) if args.tables_dir else ps_base
     if args.out_dir:
         out_dir = Path(args.out_dir)
     else:
         rtag = (f'rot_{rot_min:g}_{rot_max:g}'
                 if rot_min is not None and rot_max is not None else 'rot_all')
-        out_dir = base / args.mi_name / 'build' / rtag
+        out_dir = ps_base / args.mi_name / 'build' / rtag
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f'[build_intrinsic] {args.param_set} / {args.mi_name}  '
           f'rot=[{rot_min},{rot_max}]  -> {out_dir}')
