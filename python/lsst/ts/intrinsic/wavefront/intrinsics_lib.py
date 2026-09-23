@@ -144,32 +144,46 @@ DEFAULT_MATCHED_THRESHOLD_ARCSEC = None
 # Visit marker scheme (shared by all per-visit AOS plots)
 # ============================================================
 #
-# Color    = elevation bucket (centered on 30, 40, 50, 60, 70 deg ±5°)
+# Color    = elevation bucket (centered on 30, 40, 50, 60, 70, 75 deg,
+#            within ±ELEV_HALFWIDTH_DEG of a center)
 # Shape    = chunky arrow pointing in the rotator direction, one of nine
 #            buckets (-60, -45, -30, -15, 0, 15, 30, 45, 60 deg)
-# Edge     = filter band; i-band uses edge = face (no visible outline);
-#            other bands get a distinctive outline color so the few
-#            non-i visits are easy to spot
+# Band dot = a small dot overlaid at the center of the arrow shaft, filled
+#            with the Rubin standard color for the filter band. The dot sits
+#            on top of the arrow so the elevation color stays readable; an
+#            edge outline would hide it.
 
-ELEV_CENTERS  = (30, 40, 50, 60, 70)
-ELEV_HALFWIDTH = 5
+# 75 deg is a real observed elevation (the BLOCK-T720 upward bounce leg) and
+# sits only 5 deg from the 70 deg center, so the buckets are narrower than the
+# 10 deg spacing would allow: the half-width is a parameter, defaulting to
+# 2 deg, which cleanly separates 70 from 75.
+ELEV_CENTERS  = (30, 40, 50, 60, 70, 75)
+ELEV_HALFWIDTH_DEG = 2.0
 ROT_CENTERS   = (-60, -45, -30, -15, 0, 15, 30, 45, 60)
 
 ELEV_COLORS = {
     30: 'tab:blue', 40: 'tab:green', 50: 'tab:orange',
-    60: 'tab:red',  70: 'tab:purple',
+    60: 'tab:red',  70: 'tab:purple', 75: 'tab:brown',
 }
 
-# Band → marker edge color. None for i-band means "edge = face color"
-# (no visible outline); all the other bands get a distinct outline.
-BAND_EDGE_COLORS = {
-    'u': 'magenta',
-    'g': 'lime',
-    'r': 'red',
-    'i': None,
-    'z': 'gold',
-    'y': 'black',
+# Band → dot face color, for the small dot overlaid on the arrow shaft.
+# The Rubin standard filter palette, taken from `lsst.utils.plotting`
+# (`get_band_dicts()['colors']`, DM-51122 revised in DM-51690) so this stays
+# in step with the observatory-wide convention. The literal below is the
+# w_2026_33 value, used only if lsst.utils is unavailable.
+BAND_COLORS = {
+    'u': '#1600EA', 'g': '#31DE1F', 'r': '#B52626',
+    'i': '#370201', 'z': '#BA52FF', 'y': '#61A2B3',
 }
+try:
+    from lsst.utils.plotting import get_band_dicts as _get_band_dicts
+    BAND_COLORS = dict(_get_band_dicts()['colors'])
+except Exception:          # no lsst.utils (or API change) — keep the literal
+    pass
+
+# Size of the band dot, as a fraction of the host marker's markersize. Kept
+# small so the arrow's direction (the rotator angle) stays readable under it.
+BAND_DOT_SIZE_FRAC = 0.34
 
 
 def _arrow_marker(angle_deg, head_w=1.30, head_h=0.70, shaft_w=0.50):
@@ -214,14 +228,35 @@ def _alt_to_deg(alt_value):
     return np.rad2deg(a) if abs(a) < 2.0 * np.pi + 1e-3 else a
 
 
-def _classify_elev(alt_deg):
-    """Return the nearest elevation bucket center, or None if outside all."""
+def _classify_elev(alt_deg, halfwidth_deg=None):
+    """Return the matching elevation bucket center, or None if outside all.
+
+    Parameters
+    ----------
+    alt_deg : `float`
+        Elevation in degrees.
+    halfwidth_deg : `float`, optional
+        Half-width of the acceptance window about each center, in degrees.
+        Defaults to `ELEV_HALFWIDTH_DEG`. Centers 70 and 75 deg are only
+        5 deg apart, so a half-width above 2.5 deg makes them ambiguous.
+
+    Returns
+    -------
+    center : `int` or `None`
+        The nearest center within `halfwidth_deg` degrees, or None if the
+        value falls outside every window.
+    """
     if not np.isfinite(alt_deg):
         return None
+    hw = ELEV_HALFWIDTH_DEG if halfwidth_deg is None else float(halfwidth_deg)
+    # Nearest center wins, so overlapping windows degrade gracefully rather
+    # than letting declaration order decide.
+    best, best_d = None, None
     for c in ELEV_CENTERS:
-        if (c - ELEV_HALFWIDTH) <= alt_deg < (c + ELEV_HALFWIDTH):
-            return c
-    return None
+        d = abs(alt_deg - c)
+        if d <= hw and (best_d is None or d < best_d):
+            best, best_d = c, d
+    return best
 
 
 def _classify_rot(rot_deg):
@@ -232,24 +267,30 @@ def _classify_rot(rot_deg):
     return int(centers[int(np.argmin(np.abs(centers - rot_deg)))])
 
 
-def classify_visit(alt_deg=None, rot_deg=None, band=None):
+def classify_visit(alt_deg=None, rot_deg=None, band=None,
+                   elev_halfwidth_deg=None):
     """Classify a visit's elev/rot/band into the marker-scheme buckets.
 
     Parameters
     ----------
-    alt_deg : float, optional
+    alt_deg : `float`, optional
         Elevation in degrees (radians OK, auto-detected).
-    rot_deg : float, optional
+    rot_deg : `float`, optional
         Rotator angle in degrees.
-    band : str, optional
+    band : `str`, optional
         Filter band; first character is used (e.g. 'i_06' → 'i').
+    elev_halfwidth_deg : `float`, optional
+        Half-width in degrees of the elevation acceptance window about each
+        center. Defaults to `ELEV_HALFWIDTH_DEG`.
 
     Returns
     -------
-    dict with keys 'elev', 'rot', 'band' — values are the bucket center
-    (int) or None for missing/out-of-range, and a one-character band.
+    buckets : `dict`
+        Keys 'elev', 'rot', 'band' — values are the bucket center (`int`) or
+        None for missing/out-of-range, and a one-character band.
     """
-    elev = _classify_elev(_alt_to_deg(alt_deg)) if alt_deg is not None else None
+    elev = (_classify_elev(_alt_to_deg(alt_deg), elev_halfwidth_deg)
+            if alt_deg is not None else None)
     rot = _classify_rot(rot_deg) if rot_deg is not None else None
     if band is None:
         b = None
@@ -268,34 +309,113 @@ def visit_marker_style(elev=None, rot=None, band=None,
 
     Returns a dict suitable for plt.plot(...): marker, color, mfc, mec,
     mew, markersize, linestyle.
+
+    Notes
+    -----
+    The filter band is **not** encoded here. Band is drawn as a separate small
+    dot on top of the arrow — see `visit_band_dot_style` and
+    `plot_visit_point`. Encoding band as a marker edge, as this function used
+    to, hid the elevation fill color and made non-i bands unreadable.
     """
     if elev is None or rot is None:
         return dict(marker=fallback_marker, color=fallback_color,
                     markersize=base_size, linestyle='')
     color = ELEV_COLORS[elev]
     marker = _rot_markers()[rot]
-    edge = BAND_EDGE_COLORS.get(band, None) if band is not None else None
-    if edge is None:
-        mec = color
-        mew = 0.0
-        size = base_size
-    else:
-        mec = edge
-        mew = 1.5
-        size = base_size + 1
-    if iter_ == 2:
-        mfc = 'none'
-    else:
-        mfc = color
-    return dict(marker=marker, color=color, mfc=mfc, mec=mec, mew=mew,
-                markersize=size, linestyle='')
+    mfc = 'none' if iter_ == 2 else color
+    return dict(marker=marker, color=color, mfc=mfc, mec=color, mew=0.0,
+                markersize=base_size, linestyle='')
 
 
-def build_visit_marker_lookup(visit_info):
+def visit_band_dot_style(band, host_size=7, size_frac=None):
+    """Plot kwargs for the small band dot overlaid on a visit marker.
+
+    The dot is drawn at the same (x, y) as the arrow marker, which places it
+    at the center of the arrow's shaft, and is filled with the Rubin standard
+    color for the band (`BAND_COLORS`, DM-51122 revised in DM-51690).
+
+    Parameters
+    ----------
+    band : `str` or `None`
+        Filter band; the first character is used. None or an unrecognized
+        band returns None.
+    host_size : `float`, optional
+        `markersize` of the arrow marker the dot sits on, in points.
+    size_frac : `float`, optional
+        Dot size as a fraction of `host_size` (dimensionless). Defaults to
+        `BAND_DOT_SIZE_FRAC`.
+
+    Returns
+    -------
+    kwargs : `dict` or `None`
+        Kwargs for plt.plot(...), or None if the band is unknown.
+    """
+    if band is None:
+        return None
+    b = str(band).strip().lower()[:1]
+    color = BAND_COLORS.get(b)
+    if color is None:
+        return None
+    frac = BAND_DOT_SIZE_FRAC if size_frac is None else float(size_frac)
+    # No edge: on a small arrow an outline eats into the shaft and blurs the
+    # direction the arrow is encoding.
+    return dict(marker='o', color=color, mfc=color, mec=color, mew=0.0,
+                markersize=max(1.2, host_size * frac), linestyle='')
+
+
+def plot_visit_point(ax, x, y, style, band=None, dot_size_frac=None,
+                     **kwargs):
+    """Draw one visit marker plus its band dot on `ax`.
+
+    This is the generic drawer every per-visit AOS plot should use, so the
+    arrow (elevation color, rotator shape) and the band dot stay consistent
+    across products.
+
+    Parameters
+    ----------
+    ax : `matplotlib.axes.Axes`
+        Axes to draw on.
+    x, y : `float` or `array_like`
+        Point position, in data coordinates.
+    style : `dict`
+        Marker kwargs from `visit_marker_style`.
+    band : `str`, optional
+        Filter band. If None or unrecognized, no dot is drawn.
+    dot_size_frac : `float`, optional
+        Passed to `visit_band_dot_style` as `size_frac` (dimensionless).
+    **kwargs
+        Extra kwargs applied to the arrow marker (e.g. `zorder`, `alpha`,
+        `label`). `zorder` also lifts the dot so it stays on top.
+
+    Returns
+    -------
+    lines : `list`
+        The Line2D objects drawn: the arrow, and the dot when present.
+    """
+    st = dict(style)
+    st.update(kwargs)
+    out = list(ax.plot([x], [y], **st))
+    dot = visit_band_dot_style(band, host_size=st.get('markersize', 7),
+                              size_frac=dot_size_frac)
+    if dot is not None:
+        dot['zorder'] = st.get('zorder', 2) + 0.1
+        out += list(ax.plot([x], [y], **dot))
+    return out
+
+
+def build_visit_marker_lookup(visit_info, elev_halfwidth_deg=None):
     """Build a (day_obs, seq_num) → classified-visit dict from a visits table.
 
     Reads `alt`, `rotator_angle`, and `band` columns when present. Useful
     for joining marker styles onto a fit table indexed by (day_obs, seq_num).
+
+    Parameters
+    ----------
+    visit_info : `astropy.table.Table`
+        Visits table with `day_obs` and `seq_num`, optionally `alt` (deg or
+        rad), `rotator_angle` (deg) and `band`.
+    elev_halfwidth_deg : `float`, optional
+        Elevation bucket half-width in degrees, passed to `classify_visit`.
     """
     has_alt = 'alt' in visit_info.colnames
     has_rot = 'rotator_angle' in visit_info.colnames
@@ -307,18 +427,27 @@ def build_visit_marker_lookup(visit_info):
         alt = float(v['alt']) if has_alt else None
         rot = float(v['rotator_angle']) if has_rot else None
         band = str(v['band']) if has_band else None
-        out[(d, s)] = classify_visit(alt_deg=alt, rot_deg=rot, band=band)
+        out[(d, s)] = classify_visit(alt_deg=alt, rot_deg=rot, band=band,
+                                     elev_halfwidth_deg=elev_halfwidth_deg)
     return out
 
 
 def markers_legend_figure(show_iter_distinction=False, show_band_legend=True,
-                          figsize=(11, 8.5)):
+                          figsize=(11, 8.5), elev_halfwidth_deg=None):
     """Standalone matplotlib figure documenting the marker scheme.
 
-    show_iter_distinction : add a third legend explaining iter1=filled,
-        iter2=open (used on tracking PDFs).
-    show_band_legend : show the band → edge-color legend (suppress if
-        all visits in your data are i-band).
+    Parameters
+    ----------
+    show_iter_distinction : `bool`, optional
+        Add a legend explaining iter1=filled, iter2=open (tracking PDFs).
+    show_band_legend : `bool`, optional
+        Show the band → dot-color legend (suppress if every visit in the
+        data is i-band).
+    figsize : `tuple`, optional
+        Figure size in inches.
+    elev_halfwidth_deg : `float`, optional
+        Half-width in degrees quoted in the elevation labels. Defaults to
+        `ELEV_HALFWIDTH_DEG`.
     """
     import matplotlib.pyplot as plt
     fig = plt.figure(figsize=figsize)
@@ -341,8 +470,9 @@ def markers_legend_figure(show_iter_distinction=False, show_band_legend=True,
     elev_handles = [plt.Line2D([], [], linestyle='', marker='o',
                                markersize=10, color=c)
                     for c in ELEV_COLORS.values()]
-    elev_labels = [f'alt ∈ [{c - ELEV_HALFWIDTH}, {c + ELEV_HALFWIDTH}) → {c}°'
-                   for c in ELEV_COLORS]
+    _hw = (ELEV_HALFWIDTH_DEG if elev_halfwidth_deg is None
+           else float(elev_halfwidth_deg))
+    elev_labels = [f'alt = {c} ± {_hw:g}°' for c in ELEV_COLORS]
     leg2 = ax.legend(elev_handles, elev_labels,
                      loc='upper right', bbox_to_anchor=(0.95, 0.95),
                      title='elevation (marker color)',
@@ -352,20 +482,14 @@ def markers_legend_figure(show_iter_distinction=False, show_band_legend=True,
     if show_band_legend:
         band_handles = []
         band_labels = []
-        for b, edge in BAND_EDGE_COLORS.items():
-            if edge is None:
-                edge_disp = 'tab:purple'  # fill color shown for visibility
-                lbl = f'{b} band — no distinct edge'
-            else:
-                edge_disp = edge
-                lbl = f'{b} band'
+        for b, dot in BAND_COLORS.items():
             band_handles.append(plt.Line2D([], [], linestyle='', marker='o',
-                                           markersize=10, color='tab:purple',
-                                           mec=edge_disp, mew=1.5))
-            band_labels.append(lbl)
+                                           markersize=8, color=dot, mfc=dot,
+                                           mec='white', mew=0.6))
+            band_labels.append(f'{b} band')
         leg3 = ax.legend(band_handles, band_labels,
                          loc='lower right', bbox_to_anchor=(0.95, 0.05),
-                         title='filter band (marker edge)',
+                         title='filter band (dot on arrow shaft)',
                          fontsize=9, title_fontsize=10, frameon=True)
         ax.add_artist(leg3)
 
