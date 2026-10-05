@@ -28,7 +28,8 @@
 #                 min_donuts, bad_fit_threshold, max_visits, ofc_normalization_yaml,
 #                 height_source, batoid_rubin_height_map_dir, height_map_fits,
 #                 height_to_z4_factor, wfs_edge_cut_deg, ...)
-#   split:        OCS/CCS decomposition params.  Optional knobs:
+#   split:        OCS/CCS decomposition params (incl. the field-edge null-space
+#                 knobs null_tol / null_weight / min_ring_coverage).  Optional knobs:
 #                   rotator_select: subset of rotator_bins to decompose (drop an
 #                     out-of-family epoch sitting at distinct rotator angles); the
 #                     full set of build grids still exists -> no rebuild.
@@ -78,8 +79,20 @@ defaults:
     rotation_sign: 1                  # fixed field-rotation sense: +1 | -1
     spin_sign: 1
     m_max: 12
-    degen_assignment: ocs             # ocs | ccs | split
+    degen_assignment: ocs             # ocs | ccs | split (also decides the null space, below)
     ridge: 1.0e-3
+    # Field-edge null space.  On the outer rings each rotator dataset covers only
+    # part of the azimuth, so some O/C combinations are unconstrained (and the
+    # outermost ring can have fewer samples than unknowns).  Singular directions
+    # below null_tol x the largest are treated as null and assigned per
+    # degen_assignment with weight null_weight (ocs: camera block penalised
+    # 1/null_weight harder -> unconstrained signal goes to the telescope map);
+    # rings whose azimuth coverage (fraction of nodes seen by any dataset) is
+    # below min_ring_coverage are continued radially from the nearest fitted
+    # ring instead of being fit (no NaN ring, no Fourier ringing).
+    null_tol: 1.0e-2
+    null_weight: 1.0e-2
+    min_ring_coverage: 0.5
     hole_dist: 0.06
     r_min: 0.06
     r_max: 1.75
