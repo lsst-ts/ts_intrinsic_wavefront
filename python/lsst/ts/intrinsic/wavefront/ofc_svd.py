@@ -167,6 +167,9 @@ class OFCSvd:
     vmode_labels: list = field(default_factory=list)
     dof_idx: list = field(default_factory=list)   # DOF indices (0-49) in the SVD
     keep_idx: list = field(default_factory=list)   # mode indices retained
+    # The ts_ofc DoubleZernikeStateEstimator this was decomposed by, for
+    # callers needing Range-Bounded Recovery or the DOF -> wavefront map.
+    estimator: object = None
 
     def _keep(self):
         return self.keep_idx if self.keep_idx else list(range(self.n_keep_eff))
@@ -225,7 +228,8 @@ def build_ofc_svd(iZs, k_min, k_max, n_keep, n_dof=None,
         k_min=int(k_min), k_max=int(k_max),
         iZs=[int(j) for j in iZs], n_dof=estimator.n_dof,
         vmode_labels=estimator.vmode_labels,
-        dof_idx=estimator.dof_idx, keep_idx=estimator.keep_idx)
+        dof_idx=estimator.dof_idx, keep_idx=estimator.keep_idx,
+        estimator=estimator)
 
 
 def dz_table_to_W(fit_table, prefix, kj_grid):

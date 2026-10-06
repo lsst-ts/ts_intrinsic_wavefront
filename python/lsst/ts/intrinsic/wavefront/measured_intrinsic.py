@@ -720,19 +720,31 @@ def _dz_contrib_from_params(params, by_pupil, thx_deg, thy_deg,
     return dz_contrib
 
 
-def _apply_uconstraint(params, kj_grid, U_eff):
+def _apply_uconstraint(params, kj_grid, U_eff, rbr_estimator=None):
     """Project a per-(k, j) coefficient dict onto the first ``n_keep``
     U-modes.  Returns (params_proj, w_raw, w_proj) where the raw and
     projected coefficient vectors are in the row order of `kj_grid`.
 
     `kj_grid` is a list of ``(k, j)`` tuples whose order must match the
     rows of `U_eff` (i.e. how `S` was flattened before the SVD).
+
+    With `rbr_estimator` given -- a `lsst.ts.ofc.DoubleZernikeStateEstimator`
+    -- the subtracted wavefront is instead what a *range-bounded* optical
+    state reproduces: recover the degrees of freedom (DOF) under Range-Bounded
+    Recovery (RBR), then map them forward.  The u-mode projection is the
+    penalty-off limit of that, but is not computed that way here: the round
+    trip through DOF and back differs from the direct projection at the 1e-14
+    um level, and the unconstrained build has to stay reproducible.
     """
     w = np.array([float(params.get(f'dz_z{j}_c{k}', np.nan))
                   for k, j in kj_grid])
     finite = np.isfinite(w)
     w_use = np.where(finite, w, 0.0)
-    w_proj = U_eff @ (U_eff.T @ w_use)
+    if rbr_estimator is not None:
+        w_proj = rbr_estimator.wavefront_from_dof(
+            rbr_estimator.dof_range_bounded(w_use))
+    else:
+        w_proj = U_eff @ (U_eff.T @ w_use)
     out = dict(params)
     for idx, (k, j) in enumerate(kj_grid):
         out[f'dz_z{j}_c{k}'] = float(w_proj[idx])
@@ -749,7 +761,8 @@ def build_measured_intrinsic_uconstrained(donut_df, visit_table,
                                           bad_fit_threshold=2.0,
                                           data_offset=None,
                                           intrinsic_offset=None,
-                                          converge_tol=1e-3):
+                                          converge_tol=1e-3,
+                                          rbr_estimator=None):
     """U-mode-constrained variant of `build_measured_intrinsic`.
 
     For each visit, fit *all* (k, j) DZ coefficients in `kj_grid`,
@@ -802,6 +815,8 @@ def build_measured_intrinsic_uconstrained(donut_df, visit_table,
     print(f"U-constrained DZ fit:  "
           f"{n_modes} (k,j) modes total; U_eff = {U_eff.shape}  "
           f"(n_keep = {U_eff.shape[1]})")
+    print(f"  state recovery: "
+          f"{'range-bounded (RBR)' if rbr_estimator is not None else 'truncated SVD'}")
 
     for it in range(n_iter):
         fit_rows_proj = []
@@ -819,7 +834,7 @@ def build_measured_intrinsic_uconstrained(donut_df, visit_table,
                 dobs, snum, img_idx)
             fit_rows_raw.append(params_raw)
             params_proj, _w, _w_p = _apply_uconstraint(
-                params_raw, kj_grid, U_eff)
+                params_raw, kj_grid, U_eff, rbr_estimator=rbr_estimator)
             fit_rows_proj.append(params_proj)
             dz_contrib[mask] = _dz_contrib_from_params(
                 params_proj, by_pupil, thx[mask], thy[mask],

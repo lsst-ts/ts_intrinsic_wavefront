@@ -17,6 +17,11 @@ where <out> defaults to
 
 Config (n_keep, path, filter, rotator bins, ...) comes from mi_config.yaml,
 selected by --param-set + --mi-name; explicit flags override.  RSP-only.
+
+Set ``build.range_bounded_recovery: true`` to subtract a *range-bounded*
+optical state instead of the u-mode projection -- Range-Bounded Recovery (RBR),
+in ``lsst.ts.ofc``, optionally tuned by ``build.rbr_kappa`` and
+``build.rbr_power``.  Default off.
 """
 import argparse
 from pathlib import Path
@@ -137,6 +142,11 @@ def main():
     height_map_dir = b.get('batoid_rubin_height_map_dir')
     height_map_fits = b.get('height_map_fits')
     height_to_z4_factor = b.get('height_to_z4_factor')
+    # Range-Bounded Recovery: off by default, so an unchanged config rebuilds
+    # the unconstrained MIW bit for bit.
+    rbr_enabled = bool(b.get('range_bounded_recovery', False))
+    rbr_kappa = b.get('rbr_kappa')
+    rbr_power = b.get('rbr_power')
     wfs_edge_cut_deg = float(b.get('wfs_edge_cut_deg', 1.75))
     n_radial_bins_azimuth = int(b.get('n_radial_bins_azimuth', 4))
     azimuth_bin_deg = float(b.get('azimuth_bin_deg', 15.0))
@@ -196,6 +206,23 @@ def main():
     label = f'nkeep_{n_keep_eff}'
     print(f'  SVD: U_eff={U_eff.shape}, n_dof={svd.n_dof}, n_keep_eff={n_keep_eff}')
 
+    # ---- Range-Bounded Recovery (opt-in) ----
+    rbr_estimator = None
+    if rbr_enabled:
+        rbr_estimator = svd.estimator
+        # dof_range_bounded reads kappa/power from the controller config, as
+        # ts_ofc does for truncation_index and motion_penalty.
+        if rbr_kappa is not None:
+            rbr_estimator.ofc_data.controller['rbr_kappa'] = float(rbr_kappa)
+        if rbr_power is not None:
+            rbr_estimator.ofc_data.controller['rbr_power'] = int(rbr_power)
+        from lsst.ts.ofc import RBR_DEFAULT_KAPPA, RBR_DEFAULT_POWER
+        ctrl = rbr_estimator.ofc_data.controller
+        print(f'  RBR on: kappa={ctrl.get("rbr_kappa", RBR_DEFAULT_KAPPA):g} '
+              f'(knee at |d_j| = kappa * r_j), '
+              f'power={ctrl.get("rbr_power", RBR_DEFAULT_POWER)} '
+              f'(penalty grows as |d_j|**(2*power))')
+
     # ---- per-donut CCD-height Z4 ----
     Z4hgt = None
     if 4 in iZs:
@@ -221,7 +248,7 @@ def main():
         donut_df, visits_kept, coord_sys, iZs, kj_grid=kj_grid, U_eff=U_eff,
         n_iter=n_iter, n_bins=n_bins, fp_radius_basis=fp_radius_basis,
         fp_radius_grid=fp_radius_grid, min_donuts=min_donuts,
-        bad_fit_threshold=bad_fit_threshold)
+        bad_fit_threshold=bad_fit_threshold, rbr_estimator=rbr_estimator)
     final = result['iter_results'][-1]
     xbins, ybins = result['xbins'], result['ybins']
     print(f'  Path A: {n_iter} iters, {len(final["fit_rows"])} visits')
@@ -260,7 +287,14 @@ def main():
     A_last = np.where(np.isfinite(ibp.stack_per_visit_coeffs(final['fit_rows_raw'], kj_grid)),
                       ibp.stack_per_visit_coeffs(final['fit_rows_raw'], kj_grid), 0.0) @ U_eff
     V_last = A_last / np.asarray(Sigma[keep_idx])[None, :]
-    dof_last = svd.dof(A_last)
+    W_raw_for_dof = ibp.stack_per_visit_coeffs(final['fit_rows_raw'], kj_grid)
+    if rbr_estimator is not None:
+        # The state the build actually subtracted, so the reported DOF match
+        # the MIW rather than the unconstrained recovery.
+        dof_last = rbr_estimator.dof_range_bounded(
+            np.where(np.isfinite(W_raw_for_dof), W_raw_for_dof, 0.0))
+    else:
+        dof_last = svd.dof(A_last)
     W_raw = ibp.stack_per_visit_coeffs(final['fit_rows_raw'], kj_grid)
     W_fit = ibp.stack_per_visit_coeffs(final['fit_rows'], kj_grid)
     ibp.augment_fit_rows_with_modes(
@@ -290,7 +324,9 @@ def main():
     with open(out_dir / 'mi_config.yaml', 'w') as fh:
         yaml.safe_dump({'param_set': args.param_set, 'mi_name': args.mi_name,
                         'rot_min': rot_min, 'rot_max': rot_max,
-                        'n_keep_eff': int(n_keep_eff), **cfg}, fh, sort_keys=False)
+                        'n_keep_eff': int(n_keep_eff),
+                        'range_bounded_recovery': bool(rbr_enabled),
+                        **cfg}, fh, sort_keys=False)
     print('[build_intrinsic] done.')
 
 
