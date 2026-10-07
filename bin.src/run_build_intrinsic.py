@@ -20,8 +20,15 @@ selected by --param-set + --mi-name; explicit flags override.  RSP-only.
 
 Set ``build.range_bounded_recovery: true`` to subtract a *range-bounded*
 optical state instead of the u-mode projection -- Range-Bounded Recovery (RBR),
-in ``lsst.ts.ofc``, optionally tuned by ``build.rbr_kappa`` and
-``build.rbr_power``.  Default off.
+in ``lsst.ts.ofc``, optionally tuned by ``build.rbr_kappa``,
+``build.rbr_power`` and ``build.rbr_penalty_weight``.  Default off.
+
+For the MIW the measured wavefront drives some bending modes to tens of times
+their allowed range, and at that amplitude the barrier must not be confined to
+the retained-mode subspace: bounding those modes there drags the hexapods that
+correct Z11 along with them.  Set ``build.rbr_full_dof: true`` with ``n_keep``
+equal to ``n_dof`` for the "50/50 RBR" scheme, in which the barrier replaces
+mode truncation as the only regularizer.
 """
 import argparse
 from pathlib import Path
@@ -147,6 +154,13 @@ def main():
     rbr_enabled = bool(b.get('range_bounded_recovery', False))
     rbr_kappa = b.get('rbr_kappa')
     rbr_power = b.get('rbr_power')
+    rbr_penalty_weight = b.get('rbr_penalty_weight')
+    # Solve over all DOF with the barrier as the only regularizer, rather than
+    # inside the retained-mode subspace.  Needed when the measured wavefront
+    # drives some DOF far outside range: the subspace solve couples the DOF, so
+    # bounding those drags along the hexapods that correct Z11.  See
+    # `invert_range_penalty` in ts_ofc.
+    rbr_full_dof = bool(b.get('rbr_full_dof', False))
     wfs_edge_cut_deg = float(b.get('wfs_edge_cut_deg', 1.75))
     n_radial_bins_azimuth = int(b.get('n_radial_bins_azimuth', 4))
     azimuth_bin_deg = float(b.get('azimuth_bin_deg', 15.0))
@@ -216,12 +230,22 @@ def main():
             rbr_estimator.ofc_data.controller['rbr_kappa'] = float(rbr_kappa)
         if rbr_power is not None:
             rbr_estimator.ofc_data.controller['rbr_power'] = int(rbr_power)
-        from lsst.ts.ofc import RBR_DEFAULT_KAPPA, RBR_DEFAULT_POWER
+        if rbr_penalty_weight is not None:
+            rbr_estimator.ofc_data.controller['rbr_penalty_weight'] = \
+                float(rbr_penalty_weight)
+        from lsst.ts.ofc import (RBR_DEFAULT_KAPPA, RBR_DEFAULT_POWER,
+                                 RBR_DEFAULT_WEIGHT)
         ctrl = rbr_estimator.ofc_data.controller
         print(f'  RBR on: kappa={ctrl.get("rbr_kappa", RBR_DEFAULT_KAPPA):g} '
               f'(knee at |d_j| = kappa * r_j), '
               f'power={ctrl.get("rbr_power", RBR_DEFAULT_POWER)} '
-              f'(penalty grows as |d_j|**(2*power))')
+              f'(penalty grows as |d_j|**(2*power)), '
+              f'lambda='
+              f'{ctrl.get("rbr_penalty_weight", RBR_DEFAULT_WEIGHT):g} '
+              f'um^2 of wavefront (barrier weight)')
+        scheme = ('all DOF, barrier is the only regularizer' if rbr_full_dof
+                  else f'restricted to the {n_keep_eff} retained modes')
+        print(f'  RBR solve: {scheme}')
 
     # ---- per-donut CCD-height Z4 ----
     Z4hgt = None
@@ -248,7 +272,8 @@ def main():
         donut_df, visits_kept, coord_sys, iZs, kj_grid=kj_grid, U_eff=U_eff,
         n_iter=n_iter, n_bins=n_bins, fp_radius_basis=fp_radius_basis,
         fp_radius_grid=fp_radius_grid, min_donuts=min_donuts,
-        bad_fit_threshold=bad_fit_threshold, rbr_estimator=rbr_estimator)
+        bad_fit_threshold=bad_fit_threshold, rbr_estimator=rbr_estimator,
+        rbr_full_dof=rbr_full_dof)
     final = result['iter_results'][-1]
     xbins, ybins = result['xbins'], result['ybins']
     print(f'  Path A: {n_iter} iters, {len(final["fit_rows"])} visits')
@@ -292,7 +317,8 @@ def main():
         # The state the build actually subtracted, so the reported DOF match
         # the MIW rather than the unconstrained recovery.
         dof_last = rbr_estimator.dof_range_bounded(
-            np.where(np.isfinite(W_raw_for_dof), W_raw_for_dof, 0.0))
+            np.where(np.isfinite(W_raw_for_dof), W_raw_for_dof, 0.0),
+            full_dof=rbr_full_dof)
     else:
         dof_last = svd.dof(A_last)
     W_raw = ibp.stack_per_visit_coeffs(final['fit_rows_raw'], kj_grid)
@@ -326,6 +352,12 @@ def main():
                         'rot_min': rot_min, 'rot_max': rot_max,
                         'n_keep_eff': int(n_keep_eff),
                         'range_bounded_recovery': bool(rbr_enabled),
+                        'rbr_full_dof': bool(rbr_full_dof),
+                        'recovery_scheme': (
+                            f'{svd.n_dof}/{n_keep_eff}'
+                            + (' RBR' if rbr_enabled else '')
+                            + (' (barrier is the only regularizer)'
+                               if rbr_enabled and rbr_full_dof else '')),
                         **cfg}, fh, sort_keys=False)
     print('[build_intrinsic] done.')
 

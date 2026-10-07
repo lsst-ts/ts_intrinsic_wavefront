@@ -720,7 +720,8 @@ def _dz_contrib_from_params(params, by_pupil, thx_deg, thy_deg,
     return dz_contrib
 
 
-def _apply_uconstraint(params, kj_grid, U_eff, rbr_estimator=None):
+def _apply_uconstraint(params, kj_grid, U_eff, rbr_estimator=None,
+                       rbr_full_dof=False):
     """Project a per-(k, j) coefficient dict onto the first ``n_keep``
     U-modes.  Returns (params_proj, w_raw, w_proj) where the raw and
     projected coefficient vectors are in the row order of `kj_grid`.
@@ -735,6 +736,11 @@ def _apply_uconstraint(params, kj_grid, U_eff, rbr_estimator=None):
     penalty-off limit of that, but is not computed that way here: the round
     trip through DOF and back differs from the direct projection at the 1e-14
     um level, and the unconstrained build has to stay reproducible.
+
+    `rbr_full_dof` solves over every DOF with the barrier as the only
+    regularizer instead of inside the retained-mode subspace.  Use it with
+    every mode retained -- the "50/50 RBR" scheme -- where mode truncation is
+    meant to play no part.
     """
     w = np.array([float(params.get(f'dz_z{j}_c{k}', np.nan))
                   for k, j in kj_grid])
@@ -742,7 +748,7 @@ def _apply_uconstraint(params, kj_grid, U_eff, rbr_estimator=None):
     w_use = np.where(finite, w, 0.0)
     if rbr_estimator is not None:
         w_proj = rbr_estimator.wavefront_from_dof(
-            rbr_estimator.dof_range_bounded(w_use))
+            rbr_estimator.dof_range_bounded(w_use, full_dof=rbr_full_dof))
     else:
         w_proj = U_eff @ (U_eff.T @ w_use)
     out = dict(params)
@@ -762,7 +768,8 @@ def build_measured_intrinsic_uconstrained(donut_df, visit_table,
                                           data_offset=None,
                                           intrinsic_offset=None,
                                           converge_tol=1e-3,
-                                          rbr_estimator=None):
+                                          rbr_estimator=None,
+                                          rbr_full_dof=False):
     """U-mode-constrained variant of `build_measured_intrinsic`.
 
     For each visit, fit *all* (k, j) DZ coefficients in `kj_grid`,
@@ -834,7 +841,8 @@ def build_measured_intrinsic_uconstrained(donut_df, visit_table,
                 dobs, snum, img_idx)
             fit_rows_raw.append(params_raw)
             params_proj, _w, _w_p = _apply_uconstraint(
-                params_raw, kj_grid, U_eff, rbr_estimator=rbr_estimator)
+                params_raw, kj_grid, U_eff, rbr_estimator=rbr_estimator,
+                rbr_full_dof=rbr_full_dof)
             fit_rows_proj.append(params_proj)
             dz_contrib[mask] = _dz_contrib_from_params(
                 params_proj, by_pupil, thx[mask], thy[mask],
