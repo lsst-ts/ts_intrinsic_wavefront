@@ -22,6 +22,12 @@ Config knobs (mi_config.yaml `split:` block, per entry):
                       OCS-only (camera term forced to 0 in the outputs).
   * ocs_only        — explicit Noll j to force OCS-only.
   * build_from      — reuse a parent entry's already-built grids (no rebuild).
+  * null_tol / null_weight / min_ring_coverage — field-edge null-space handling
+                      (intrinsic_split.decompose_spin_lsq): singular directions a
+                      ring's coverage cannot constrain are assigned by
+                      degen_assignment instead of split 50/50, and rings with too
+                      little azimuth coverage are continued radially instead of
+                      fit (no more NaN outer ring / Fourier ringing at the edge).
 RSP-only (numpy/scipy + intrinsic_split).
 """
 import argparse
@@ -39,7 +45,8 @@ DEFAULT_NOLL = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
 DEFAULT_SPLIT = dict(rotation_sign=1, spin_sign=1, m_max=12,
                      degen_assignment='ocs', ridge=1e-3, hole_dist=0.06,
                      r_min=0.06, r_max=1.75, n_r=80, n_az=180,
-                     r_lim_lo=0.1, r_lim_hi=1.6, use_z4_optical=True)
+                     r_lim_lo=0.1, r_lim_hi=1.6, use_z4_optical=True,
+                     null_tol=1e-2, null_weight=1e-2, min_ring_coverage=0.5)
 
 
 def _map_rms(vals_pol, R, r_lim):
@@ -181,7 +188,13 @@ def main():
         return isp.decompose_spin_lsq(Zc, V, th_rad, A, n_spin=n_spin, s=s,
                                       m_max=sp['m_max'], ridge=sp['ridge'],
                                       degen_assignment=sp['degen_assignment'],
-                                      ocs_only=ocs)
+                                      ocs_only=ocs,
+                                      null_tol=sp['null_tol'],
+                                      null_weight=sp['null_weight'],
+                                      min_coverage=sp['min_ring_coverage'])
+    print(f"[intrinsic_split] field-edge null space: null_tol={sp['null_tol']:g}, "
+          f"null_weight={sp['null_weight']:g} (assignment={sp['degen_assignment']}), "
+          f"min_ring_coverage={sp['min_ring_coverage']:g}")
 
     for grp in groups:
         n_spin = sp['spin_sign'] * grp['spin']
@@ -218,6 +231,21 @@ def main():
         # camera RMS that was given up — informs whether OCS-only is justified.
         c_dec = _decomp(Zc, V, n_spin, False) if (ocs and n_rot_distinct >= 2) else dec
 
+        # Field-edge null-space report: rings whose design had null directions
+        # (assigned by degen_assignment) and rings continued radially for lack
+        # of azimuth coverage.  Both normally sit at the outer edge only.
+        null_rings = np.nonzero(dec['ring_null_dim'] > 0)[0]
+        filled_rings = np.nonzero(dec['ring_filled'])[0]
+        empty_rings = np.nonzero(~np.isfinite(dec['O_pol']).all(axis=1))[0]
+        if null_rings.size or filled_rings.size or empty_rings.size:
+            def _rr(idx):
+                return (f'r={R[idx.min()]:.3f}..{R[idx.max()]:.3f} ({idx.size} rings)'
+                        if idx.size else 'none')
+            print(f"  {grp['label']}: null-space rings {_rr(null_rings)}"
+                  f"{' max null dim ' + str(int(dec['ring_null_dim'].max())) if null_rings.size else ''}"
+                  f"; continued rings {_rr(filled_rings)}"
+                  f"; rings without data {_rr(empty_rings)}")
+
         for j, part in comps:
             dec_by_j[j] = (dec, part, Zc, ocs)
             metrics.append(dict(
@@ -228,7 +256,11 @@ def main():
                 # for OCS-only j the OUTPUT C is 0 but this shows what was given up.
                 C_cam=_map_rms(part(c_dec['C_pol']), R, r_lim),
                 residRMS=_map_rms(part(dec['res']), R, r_lim),
-                ocs_only=bool(ocs)))
+                ocs_only=bool(ocs),
+                n_null_rings=int(null_rings.size),
+                max_null_dim=int(max(dec['ring_null_dim'].max(), 0)),
+                n_continued_rings=int(filled_rings.size),
+                min_ring_coverage_seen=float(np.nanmin(dec['ring_coverage']))))
 
     metrics_df = pd.DataFrame(metrics).sort_values('j').reset_index(drop=True)
     print(f"  overall |O| tel RMS={np.sqrt((metrics_df['O_tel']**2).mean()):.4f}  "
@@ -242,7 +274,9 @@ def main():
                 n_bins_used=int(len(thetas)),
                 rotator_select=([list(b) for b in sel] if sel is not None else None),
                 ocs_only=sorted(int(j) for j in ocs_only),
-                build_from=(src_mi if src_mi != args.mi_name else None))
+                build_from=(src_mi if src_mi != args.mi_name else None),
+                null_tol=float(sp['null_tol']), null_weight=float(sp['null_weight']),
+                min_ring_coverage=float(sp['min_ring_coverage']))
     _write_outputs(base, dec_by_j, noll_list, metrics_df, A, X, Y,
                    thx0, thy0, meta)
 
@@ -306,10 +340,17 @@ def _write_outputs(base, dec_by_j, noll_list, metrics_df, A, X, Y,
     thx0 = np.asarray(thx0, dtype=np.float64)
     thy0 = np.asarray(thy0, dtype=np.float64)
     cols = {'thx_deg': thx0, 'thy_deg': thy0}
+    # Output lattice points that sit a fraction of a radial step past the polar
+    # grid's r_max (the disk grid is cut at the build grid's own radius) take the
+    # nearest polar node's value instead of NaN; nothing farther is extrapolated.
+    R_pol = np.hypot(np.asarray(X)[:, 0], np.asarray(Y)[:, 0])
+    rim = float(np.median(np.diff(R_pol))) if n_r > 1 else None
     for j in jorder:
         dec, part, _, is_ocs = dec_by_j[j]
-        O_pts = isp.polar_field_to_points(part(dec['O_pol']), X, Y, thx0, thy0)
-        C_pts = isp.polar_field_to_points(part(dec['C_pol']), X, Y, thx0, thy0)
+        O_pts = isp.polar_field_to_points(part(dec['O_pol']), X, Y, thx0, thy0,
+                                          nearest_within=rim)
+        C_pts = isp.polar_field_to_points(part(dec['C_pol']), X, Y, thx0, thy0,
+                                          nearest_within=rim)
         cols[f'Z{j}_OCS'] = np.asarray(O_pts, dtype=np.float64)
         cols[f'Z{j}_CCS'] = np.asarray(C_pts, dtype=np.float64)
     maps = Table(cols)

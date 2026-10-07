@@ -18,6 +18,27 @@ solve per ``(r, m)``.  ``m = 0`` (the axisymmetric profile) is degenerate —
 an axisymmetric pattern is identical in both frames — so it is assigned by a
 flag (``'ocs'``, ``'ccs'`` or ``'split'``).
 
+Null space at the field edge
+----------------------------
+The ``m = 0`` degeneracy is only the full-coverage special case.  On the
+outer rings the detector footprint, dead CCDs and the data edge leave each
+rotator dataset covering only part of the azimuth, so there are further
+combinations of ``O`` and ``C`` the sampled data cannot tell apart (an
+``O`` bump at an azimuth seen by one dataset only is indistinguishable from
+a ``C`` bump at the matching camera azimuth), and the outermost ring can
+even have fewer samples than unknowns.  A plain ridge solve returns the
+minimum-norm point of that null space — an arbitrary 50/50 O/C split that
+leaks telescope signal into the camera map and vice versa — and an
+under-determined ring used to be skipped outright (a NaN ring, which then
+punched a NaN annulus into the handoff maps).  :func:`decompose_spin_lsq`
+therefore does a rank-revealing solve per ring (:func:`solve_ring_nullspace`):
+directions with singular value below ``null_tol`` x the largest are treated
+as null and their component is assigned by the same ``degen_assignment``
+flag (``'ocs'`` keeps the camera map free of unconstrained signal), rings
+whose azimuth coverage is below ``min_coverage`` are not fit but continued
+radially from the nearest constrained ring, and the per-ring rank / null
+dimension / coverage are returned for diagnostics.
+
 Intended for scalar (rotationally-invariant) Zernikes such as Z4 defocus,
 whose coefficient value does not pick up phase under field rotation.
 
@@ -307,8 +328,84 @@ def decompose_polar(Z, thetas_rad, A, s=1, m0_assignment='ocs', m_max=None):
             's': int(s), 'm0_assignment': m0_assignment}
 
 
+def ring_coverage(valid):
+    """Fraction of azimuth nodes sampled by at least one dataset, per ring.
+
+    ``valid`` is the (n_set, n_r, n_az) support mask from
+    :func:`sample_maps_polar`; returns an (n_r,) array in [0, 1].
+    """
+    v = np.asarray(valid, bool)
+    return np.any(v, axis=0).mean(axis=1)
+
+
+def solve_ring_nullspace(D, y, n_o, ridge=1e-3, null_tol=1e-2,
+                         degen_assignment='ocs', null_weight=1e-2):
+    """Rank-revealing ridge solve of one ring's design ``D x = y`` with an
+    explicit assignment of the null-space component.
+
+    ``D`` is (N, P) complex with the first ``n_o`` columns the telescope (O)
+    basis and the remaining ``P - n_o`` the camera (C) basis; ``y`` is (N,).
+    The SVD ``D = U diag(s) V^H`` splits the unknowns into *range* directions
+    (``s > null_tol * s_max``), which get the Tikhonov-damped least-squares
+    solution ``s/(s^2 + lam)`` with ``lam = ridge * trace(D^H D) / P`` (the
+    same ridge as before), and *null* directions (``s <= null_tol * s_max``,
+    plus the ``P - N`` directions a thin SVD never sees when ``N < P``), whose
+    data constraint is nil.  Along the null directions any coefficient fits
+    the data equally well, so the component is chosen by ``degen_assignment``
+    as the member of the family ``x + V_null z`` with the smallest *weighted*
+    norm ``|W x|``:
+
+    * ``'ocs'``   — ``W`` weighs the camera block 1 and the telescope block
+      ``sqrt(null_weight)``: unconstrained signal goes (fraction
+      ``1/(1+null_weight)``) to the telescope map, and the camera map carries
+      only what the rotator diversity actually pins down;
+    * ``'ccs'``   — the mirror image (telescope block penalised);
+    * ``'split'`` — ``W = I``: minimum-norm, the plain ridge answer (a 50/50
+      split of every unconstrained direction).
+
+    ``null_weight > 0`` keeps the problem well posed: demanding the
+    disfavoured block vanish *exactly* would send the solution to infinity
+    along null directions that barely touch that block (e.g. a telescope
+    Fourier mode nobody sampled); with the weighted norm such directions
+    simply stay at zero.  Works for ``N < P`` (an under-determined ring is no
+    longer a reason to skip it).  Returns ``(coef, rank, null_dim)``.
+    """
+    D = np.asarray(D)
+    y = np.asarray(y)
+    N, P = D.shape
+    # The full (P, P) Vh is needed for the null basis; the thin SVD gives it
+    # when N >= P, and when N < P the full SVD is cheap (U is only N x N).
+    U, s, Vh = np.linalg.svd(D, full_matrices=(N < P))    # Vh is (P, P)
+    s_full = np.zeros(P)
+    s_full[:s.size] = s
+    s_max = float(s[0]) if s.size else 0.0
+    rng = s_full > null_tol * s_max if s_max > 0 else np.zeros(P, bool)
+    rank = int(rng.sum())
+    null_dim = P - rank
+    lam = ridge * float((s ** 2).sum()) / P
+    uy = U[:, :s.size].conj().T @ y                         # (min(N,P),)
+    filt = np.zeros(P, dtype=float)
+    filt[:s.size] = np.where(rng[:s.size], s / (s ** 2 + lam), 0.0)
+    coef_r = np.zeros(P, complex)
+    coef_r[:s.size] = filt[:s.size] * uy
+    x = Vh.conj().T @ coef_r                                # range-space solution
+    if null_dim:
+        Vn = Vh[~rng].conj().T                              # (P, null_dim) null basis
+        w = np.ones(P)
+        if degen_assignment == 'ccs':
+            w[n_o:] = np.sqrt(float(null_weight))           # penalise O, spare C
+        elif degen_assignment != 'split':
+            w[:n_o] = np.sqrt(float(null_weight))           # penalise C, spare O
+        # weighted minimum norm over the affine family x + Vn z; Vn is
+        # orthonormal and w > 0, so the system has full column rank
+        z, *_ = np.linalg.lstsq(w[:, None] * Vn, -(w * x), rcond=None)
+        x = x + Vn @ z
+    return x, rank, null_dim
+
+
 def decompose_spin_lsq(Zc, valid, thetas_rad, A, n_spin=0, s=1, m_max=12,
-                       ridge=1e-3, degen_assignment='ocs', ocs_only=False):
+                       ridge=1e-3, degen_assignment='ocs', ocs_only=False,
+                       null_tol=1e-2, min_coverage=0.5, null_weight=1e-2):
     """Hole-aware, spin-aware decomposition (unifies the scalar LSQ and the
     spin FFT).  Per radius, fit complex O and C by least squares over the
     valid samples only:
@@ -329,6 +426,19 @@ def decompose_spin_lsq(Zc, valid, thetas_rad, A, n_spin=0, s=1, m_max=12,
     ``C_pol`` is identically zero (a constrained fit, NOT a joint O+C fit with C
     discarded afterward — the two differ when the joint fit puts signal in C).
     The degenerate-mode redistribution is skipped (there is no C to assign to).
+
+    Field-edge null space (see the module docstring): each ring is solved with
+    :func:`solve_ring_nullspace`, so directions the ring's coverage cannot
+    constrain (singular value below ``null_tol`` x the largest, or an
+    under-determined ring) are assigned by ``degen_assignment`` (weighted by
+    ``null_weight``, see :func:`solve_ring_nullspace`) instead of being split
+    50/50 by the ridge, and no ring with data is skipped.  Rings
+    whose azimuth coverage (fraction of nodes seen by any dataset) is below
+    ``min_coverage`` are too sparse to support the Fourier basis; they are not
+    fit but continued radially from the nearest fitted ring, so the output is
+    defined out to ``r_max`` without Fourier ringing.  The dict also carries
+    per-ring diagnostics ``ring_coverage``, ``ring_rank``, ``ring_null_dim``
+    (-1 for rings not fit) and ``ring_filled`` (True where continued).
     """
     Zc = np.asarray(Zc, complex)
     n_set, n_r, n_az = Zc.shape
@@ -340,6 +450,12 @@ def decompose_spin_lsq(Zc, valid, thetas_rad, A, n_spin=0, s=1, m_max=12,
     O_pol = np.full((n_r, n_az), np.nan, complex)
     C_pol = np.full((n_r, n_az), np.nan, complex)
     res = np.full_like(Zc, np.nan)
+    coverage = ring_coverage(valid)
+    ring_rank = np.full(n_r, -1, int)
+    ring_null = np.full(n_r, -1, int)
+    ring_filled = np.zeros(n_r, bool)
+    samples = {}                                    # k -> [(d, jj), ...]
+    dphi = A[1] - A[0]
     for k in range(n_r):
         phi, yk, thk, idx = [], [], [], []
         for d in range(n_set):
@@ -349,6 +465,9 @@ def decompose_spin_lsq(Zc, valid, thetas_rad, A, n_spin=0, s=1, m_max=12,
                 thk.append(np.full(jj.size, thetas_rad[d])); idx.append((d, jj))
         if not phi:
             continue
+        samples[k] = idx
+        if coverage[k] < min_coverage:
+            continue                                # continued radially below
         phi = np.concatenate(phi); yk = np.concatenate(yk)
         thk = np.concatenate(thk)
         E = np.exp(1j * np.outer(phi, ms))                          # O basis
@@ -357,12 +476,11 @@ def decompose_spin_lsq(Zc, valid, thetas_rad, A, n_spin=0, s=1, m_max=12,
         else:
             Cc = E * np.exp(1j * (int(n_spin) - ms[None, :]) * s * thk[:, None])
             D = np.hstack([E, Cc[:, keepC]])                        # (N, 2nm-1)
-        if D.shape[0] < D.shape[1]:
-            continue
-        DhD = D.conj().T @ D
-        lam = ridge * np.trace(DhD).real / DhD.shape[0]
-        coef = np.linalg.solve(DhD + lam * np.eye(DhD.shape[0]),
-                               D.conj().T @ yk)
+        coef, rank, null_dim = solve_ring_nullspace(
+            D, yk, nm, ridge=ridge, null_tol=null_tol,
+            degen_assignment=degen_assignment, null_weight=null_weight)
+        ring_rank[k] = rank
+        ring_null[k] = null_dim
         Ofull = coef[:nm]
         if ocs_only:
             Cfull = np.zeros(nm, complex)        # constrained: no camera term
@@ -376,7 +494,21 @@ def decompose_spin_lsq(Zc, valid, thetas_rad, A, n_spin=0, s=1, m_max=12,
                 Ofull[i_n] *= 0.5; Cfull[i_n] = Ofull[i_n]
         O_pol[k] = EA @ Ofull
         C_pol[k] = EA @ Cfull
-        dphi = A[1] - A[0]
+    # Rings with data but too little azimuth coverage to fit: continue O and C
+    # radially from the nearest fitted ring (the field edge is extrapolated by
+    # a constant, not by a ringing Fourier series).
+    fitted = np.nonzero(ring_rank >= 0)[0]
+    if fitted.size:
+        for k in samples:
+            if ring_rank[k] >= 0:
+                continue
+            k_src = int(fitted[np.argmin(np.abs(fitted - k))])
+            O_pol[k] = O_pol[k_src]
+            C_pol[k] = C_pol[k_src]
+            ring_filled[k] = True
+    for k, idx in samples.items():
+        if not np.all(np.isfinite(O_pol[k])):
+            continue
         for (d, jj) in idx:
             shift = int(np.round(s * thetas_rad[d] / dphi))
             pred = O_pol[k] + np.exp(1j * int(n_spin) * s * thetas_rad[d]) \
@@ -384,7 +516,11 @@ def decompose_spin_lsq(Zc, valid, thetas_rad, A, n_spin=0, s=1, m_max=12,
             res[d, k, jj] = Zc[d, k, jj] - pred[jj]
     return {'O_pol': O_pol, 'C_pol': C_pol, 'res': res,
             'n_spin': int(n_spin), 's': int(s),
-            'degen_assignment': degen_assignment, 'm_max': int(m_max)}
+            'degen_assignment': degen_assignment, 'm_max': int(m_max),
+            'null_tol': float(null_tol), 'min_coverage': float(min_coverage),
+            'null_weight': float(null_weight),
+            'ring_coverage': coverage, 'ring_rank': ring_rank,
+            'ring_null_dim': ring_null, 'ring_filled': ring_filled}
 
 
 def reconstruct_at(dec, theta_rad, A):
@@ -443,13 +579,35 @@ def azimuthal_amplitude(field_pol, R, r_lim=(0.1, 1.6), n_m=9):
     return np.sqrt((np.abs(F[m]) ** 2).mean(0))[:n_m]
 
 
-def polar_field_to_points(field_pol, X, Y, thx, thy):
+def polar_field_to_points(field_pol, X, Y, thx, thy, nearest_within=None):
     """Interpolate a polar field (sampled on X, Y) onto scattered points
-    (thx, thy).  Used to resample O/C onto a focal-plane grid."""
+    (thx, thy).  Used to resample O/C onto a focal-plane grid.
+
+    Points outside the polar grid's convex hull (or in a triangle touching an
+    undefined node) interpolate to NaN.  With ``nearest_within`` (deg) set,
+    such a point takes the value of its nearest *finite* polar node when that
+    node is no farther than ``nearest_within`` — meant for the output lattice
+    points that sit a fraction of a radial step past ``r_max`` (pass the radial
+    grid step), so the handoff maps have no NaN rim while nothing farther out
+    is ever extrapolated.
+    """
     from scipy.interpolate import LinearNDInterpolator
-    interp = LinearNDInterpolator(
-        np.column_stack([X.ravel(), Y.ravel()]), field_pol.ravel())
-    return interp(np.asarray(thx), np.asarray(thy))
+    pts = np.column_stack([X.ravel(), Y.ravel()])
+    vals = np.asarray(field_pol).ravel()
+    thx = np.asarray(thx, float); thy = np.asarray(thy, float)
+    out = LinearNDInterpolator(pts, vals)(thx, thy)
+    if nearest_within is not None:
+        miss = ~np.isfinite(out)
+        if miss.any():
+            from scipy.spatial import cKDTree
+            fin = np.isfinite(vals)
+            if fin.any():
+                dist, inear = cKDTree(pts[fin]).query(
+                    np.column_stack([thx[miss], thy[miss]]))
+                fill = vals[fin][inear]
+                fill[dist > float(nearest_within)] = np.nan
+                out[miss] = fill
+    return out
 
 
 def mean_rotator(fits_table, rot_range, alt_range=None,
