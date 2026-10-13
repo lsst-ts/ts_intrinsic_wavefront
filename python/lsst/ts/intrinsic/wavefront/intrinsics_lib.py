@@ -638,7 +638,11 @@ def get_aggregate_zernikes(butler, day_obs, seq_num, coord_sys, camera,
         'day_obs': day_obs,
         'seq_num': seq_num,
         'visit': meta.get('visit', None),
-        'skyAngle': meta.get('rotAngle', np.nan),
+        # The camera rotator angle the pipeline used for its own CCS -> OCS
+        # rotation, radians in this table family.  The old `skyAngle` column
+        # held `rotAngle` (= visitInfo.boresightRotAngle), which is the sky
+        # position angle of the boresight, not the rotator.
+        'rotTelPos': meta.get('rotTelPos', np.nan),
         'ra': meta.get('ra', np.nan),
         'dec': meta.get('dec', np.nan),
         'az': meta.get('az', np.nan),
@@ -1107,7 +1111,7 @@ def stream_zernikes_to_parquet(visit_pairs, collections, butler_repo, coord_sys,
     visit_info['day_obs'] = [m['day_obs'] for m in visit_meta_list]
     visit_info['seq_num'] = [m['seq_num'] for m in visit_meta_list]
     visit_info['visit'] = [m['visit'] for m in visit_meta_list]
-    visit_info['skyAngle'] = [m['skyAngle'] for m in visit_meta_list]
+    visit_info['rotTelPos'] = [m['rotTelPos'] for m in visit_meta_list]
     visit_info['ra'] = [m['ra'] for m in visit_meta_list]
     visit_info['dec'] = [m['dec'] for m in visit_meta_list]
     visit_info['az'] = [m['az'] for m in visit_meta_list]
@@ -1198,7 +1202,7 @@ def get_zernikes_from_visits(visit_pairs, collections, butler_repo, coord_sys,
     visit_info['day_obs'] = [m['day_obs'] for m in visit_meta_list]
     visit_info['seq_num'] = [m['seq_num'] for m in visit_meta_list]
     visit_info['visit'] = [m['visit'] for m in visit_meta_list]
-    visit_info['skyAngle'] = [m['skyAngle'] for m in visit_meta_list]
+    visit_info['rotTelPos'] = [m['rotTelPos'] for m in visit_meta_list]
     visit_info['ra'] = [m['ra'] for m in visit_meta_list]
     visit_info['dec'] = [m['dec'] for m in visit_meta_list]
     visit_info['az'] = [m['az'] for m in visit_meta_list]
@@ -1329,7 +1333,12 @@ def get_rotator_angles(visits_df, visit_pairs):
 
 
 def get_visitinfo_rotator_angles(butler, visit_pairs):
-    """Get RotPA and parallactic angle from Butler raw.visitInfo."""
+    """Get RotPA and parallactic angle from Butler raw.visitInfo.
+
+    No longer part of the `get_rotator_data` chain: ``rotTelPos`` from the
+    donut metadata is the primary source and gives the same identity.  Kept as
+    a standalone cross-check.
+    """
     records = []
     print(f"Querying Butler visitInfo for {len(visit_pairs)} visits...")
     for day_obs_val, seq_num in tqdm(visit_pairs):
@@ -1383,7 +1392,12 @@ async def async_getEfdData_exprecord(client, topic, expRecord, columns=None,
 
 
 async def get_efd_rotator_angles(efd_client, butler, visit_pairs):
-    """Get actual rotator position from EFD MTRotator telemetry."""
+    """Get actual rotator position from EFD MTRotator telemetry.
+
+    No longer part of the `get_rotator_data` chain: the window-mean was not
+    reproducible between two runs of the same chunk, differing by up to
+    0.188 deg of camera rotator angle.  Kept as a standalone cross-check.
+    """
     records = []
     print(f"Querying EFD rotator positions for {len(visit_pairs)} visits...")
     for day_obs_val, seq_num in tqdm(visit_pairs):
@@ -1420,95 +1434,38 @@ async def get_efd_rotator_angles(efd_client, butler, visit_pairs):
 
 async def get_rotator_data(visits_df, visit_pairs, butler_repo,
                            rotator_threshold=DEFAULT_ROTATOR_THRESHOLD):
-    """Get rotator angles from all sources and compute best value.
+    """Get the ConsDB rotator angle per visit, as the fallback source.
 
-    Returns rotator_df with columns: day_obs, seq_num, physical_rotator_angle,
-    efd_rotator_angle, visitinfo_rotator_angle, rotator_angle, rotator_flagged.
+    The primary source is the donut table's own ``rotTelPos`` metadata, which
+    is read per visit by the extraction step and resolved in
+    `merge_rotator_to_visit_info`.  This function supplies only the ConsDB
+    fallback, so it no longer queries the EFD or Butler ``visitInfo``: the EFD
+    window-mean was not reproducible between two runs of the same chunk (up to
+    0.188 deg of camera rotator angle apart), and ``visitInfo`` gives the same
+    identity ``rotTelPos`` already holds.
+
+    Parameters
+    ----------
+    visits_df : `pandas.DataFrame`
+        ConsDB visit rows, carrying ``physical_rotator_angle`` in deg.
+    visit_pairs : `list` [`tuple`]
+        (``day_obs``, ``seq_num``) pairs, dimensionless integers.
+    butler_repo : `str`
+        Unused, kept so the signature is stable for existing callers.
+    rotator_threshold : `float`
+        Flag threshold on |rotator angle|, deg.
+
+    Returns
+    -------
+    rotator_df : `pandas.DataFrame`
+        Columns ``day_obs``, ``seq_num``, ``physical_rotator_angle`` (deg).
     """
     rotator_df = get_rotator_angles(visits_df, visit_pairs)
 
-    missing_mask = rotator_df['physical_rotator_angle'].isna()
-    missing_pairs = rotator_df.loc[missing_mask, ['day_obs', 'seq_num']].values.tolist()
-    n_missing = len(missing_pairs)
+    n_missing = int(rotator_df['physical_rotator_angle'].isna().sum())
     print(f"ConsDB physical_rotator_angle: "
-          f"{len(rotator_df) - n_missing} present, {n_missing} missing")
-
-    if n_missing > 0:
-        # Summarize missing visits by day_obs for quick inspection
-        missing_by_day = Counter(d for d, _ in missing_pairs)
-        print(f"  Missing from ConsDB — falling back to EFD, then Butler visitInfo:")
-        for d in sorted(missing_by_day):
-            day_total = sum(1 for dv, _ in visit_pairs if dv == d)
-            print(f"    day_obs={d}: {missing_by_day[d]}/{day_total} visits missing")
-        # Show individual missing visits (up to 20, then summary)
-        show_n = min(20, n_missing)
-        print(f"  First {show_n} missing (day_obs, seq_num):")
-        for d, s in missing_pairs[:show_n]:
-            print(f"    {d} {s}")
-        if n_missing > show_n:
-            print(f"    ... and {n_missing - show_n} more")
-
-        butler_rot = Butler(butler_repo, instrument='LSSTCam',
-                            collections=['LSSTCam/raw/all'])
-
-        # Step 1: try EFD first (faster — MTRotator.rotation queries)
-        efd_df = None
-        efd_client = None
-        try:
-            efd_client = makeEfdClient()
-            efd_df = await get_efd_rotator_angles(efd_client, butler_rot, missing_pairs)
-            rotator_df = rotator_df.merge(efd_df, on=['day_obs', 'seq_num'], how='left')
-        except Exception as e:
-            print(f"Warning: Could not access EFD: {e}")
-            rotator_df['efd_rotator_angle'] = np.nan
-        finally:
-            if efd_client is not None:
-                await _close_efd_client(efd_client)
-
-        # Step 2: for visits still missing (EFD returned NaN too), fall back
-        # to Butler visitInfo (much slower; only hit if needed)
-        still_missing_mask = (rotator_df['physical_rotator_angle'].isna()
-                              & rotator_df['efd_rotator_angle'].isna())
-        still_missing_pairs = rotator_df.loc[
-            still_missing_mask, ['day_obs', 'seq_num']].values.tolist()
-        n_still_missing = len(still_missing_pairs)
-
-        if n_still_missing > 0:
-            print(f"  After EFD: {n_still_missing}/{n_missing} still missing, "
-                  f"querying Butler visitInfo...")
-            visitinfo_df = get_visitinfo_rotator_angles(
-                butler_rot, still_missing_pairs)
-            rotator_df = rotator_df.merge(
-                visitinfo_df, on=['day_obs', 'seq_num'], how='left')
-        else:
-            print(f"  EFD filled all {n_missing} ConsDB-missing visits — "
-                  f"skipping Butler visitInfo queries")
-            rotator_df['visitinfo_rotator_angle'] = np.nan
-            rotator_df['visitinfo_rotpa'] = np.nan
-            rotator_df['visitinfo_par_angle'] = np.nan
-    else:
-        print("All visits have ConsDB physical_rotator_angle, "
-              "skipping EFD/visitInfo queries")
-        rotator_df['efd_rotator_angle'] = np.nan
-        rotator_df['visitinfo_rotator_angle'] = np.nan
-        rotator_df['visitinfo_rotpa'] = np.nan
-        rotator_df['visitinfo_par_angle'] = np.nan
-
-    # Best rotator: prefer ConsDB, then EFD, then visitInfo
-    rotator_df['rotator_angle'] = (
-        rotator_df['physical_rotator_angle']
-        .fillna(rotator_df.get('efd_rotator_angle', np.nan))
-        .fillna(rotator_df.get('visitinfo_rotator_angle', np.nan))
-    )
-    rotator_df['rotator_flagged'] = (
-        rotator_df['rotator_angle'].abs() > rotator_threshold)
-
-    n_flagged = rotator_df['rotator_flagged'].sum()
-    n_phys = rotator_df['physical_rotator_angle'].notna().sum()
-    n_efd = rotator_df['efd_rotator_angle'].notna().sum()
-    n_vi = rotator_df['visitinfo_rotator_angle'].notna().sum()
-    print(f"\nRotator angle sources: ConsDB={n_phys}, EFD={n_efd}, visitInfo={n_vi}")
-    print(f"Flagged (|angle| > {rotator_threshold} deg): {n_flagged}")
+          f"{len(rotator_df) - n_missing} present, {n_missing} missing "
+          "(the donut-metadata rotTelPos is the primary source)")
 
     return rotator_df
 
@@ -2009,36 +1966,105 @@ def add_intrinsic_zernikes(aosTable, intrinsic_interpolators, coord_sys):
 # Merge Helpers
 # ============================================================
 
-def _rotator_columns_for(table, rotator_df, want_flagged):
-    """Build per-row rotator_angle (and optionally rotator_flagged) arrays
-    aligned to ``table``, by matching (day_obs, seq_num) against ``rotator_df``.
+#: Values of the ``rotator_angle_source`` column.
+ROTATOR_SOURCE_ROTTELPOS = 'rotTelPos'
+ROTATOR_SOURCE_CONSDB = 'consdb'
+ROTATOR_SOURCE_MISSING = 'missing'
 
-    Shared by merge_rotator_to_visit_info and merge_rotator_to_tables so the
-    two stay in lockstep.  Returns (rot_angle_col, rot_flagged_col_or_None).
+
+def _consdb_rotator_column_for(table, rotator_df):
+    """Per-row ConsDB ``physical_rotator_angle`` in deg, aligned to ``table``
+    by matching (``day_obs``, ``seq_num``) against ``rotator_df``.
     """
     day_obs_arr = np.array(table['day_obs'])
     seq_num_arr = np.array(table['seq_num'])
-    rot_angle_col = np.full(len(table), np.nan)
-    rot_flagged_col = (np.zeros(len(table), dtype=bool)
-                       if want_flagged else None)
+    consdb_col = np.full(len(table), np.nan)
     for _, r in rotator_df.iterrows():
         mask = (day_obs_arr == r['day_obs']) & (seq_num_arr == r['seq_num'])
-        rot_angle_col[mask] = r['rotator_angle']
-        if want_flagged:
-            rot_flagged_col[mask] = r['rotator_flagged']
-    return rot_angle_col, rot_flagged_col
+        consdb_col[mask] = r['physical_rotator_angle']
+    return consdb_col
+
+
+def resolve_rotator_angle(table, rotator_df):
+    """Resolve the camera rotator angle per row: ``rotTelPos`` then ConsDB.
+
+    ``rotTelPos`` is the angle the pipeline used for its own CCS -> OCS
+    rotation, so it is the one that belongs beside the table's OCS field
+    angles.  ConsDB ``physical_rotator_angle`` is the fallback for rows whose
+    donut metadata lacks it; it is NULL on some visits, and where present it
+    differs by a median 0.129 deg and a max 0.456 deg of camera rotator angle
+    (53 visits of chunk 20251116_20251130; about 0.30 deg on the blitz path).
+    The rotator turns during the exposure to hold the sky fixed on the focal
+    plane, so each source samples the angle at a different moment -- expected
+    tracking motion, not an error.
+
+    Parameters
+    ----------
+    table : `astropy.table.QTable` or `pandas.DataFrame`
+        Carries ``day_obs``, ``seq_num`` and ``rotTelPos`` in **radians**.
+    rotator_df : `pandas.DataFrame`
+        Output of `get_rotator_data`: ``physical_rotator_angle`` in deg.
+
+    Returns
+    -------
+    angle : `numpy.ndarray`
+        Camera rotator angle in deg, NaN where neither source has a value.
+    source : `numpy.ndarray`
+        One of ``rotTelPos``, ``consdb``, ``missing`` per row.
+    """
+    n = len(table)
+    consdb_deg = _consdb_rotator_column_for(table, rotator_df)
+
+    names = (table.colnames if hasattr(table, 'colnames') else table.columns)
+    if 'rotTelPos' in names:
+        rottelpos_deg = np.degrees(np.asarray(table['rotTelPos'], dtype=float))
+        # The stored rotTelPos is NOT wrapped: on day_obs 20251116 seq_num
+        # 455 it reads -359.824295 deg where the rotator sits at +0.18 deg.
+        # Left unwrapped it would trip `rotator_flagged` on nearly every
+        # visit and corrupt any rotator binning.
+        # Same convention as `wcsutils.calc_rotator_from_visitinfo`.
+        rottelpos_deg = (rottelpos_deg + 180.0) % 360.0 - 180.0
+    else:
+        rottelpos_deg = np.full(n, np.nan)
+
+    angle = np.full(n, np.nan)
+    source = np.full(n, ROTATOR_SOURCE_MISSING, dtype=object)
+
+    use_rtp = np.isfinite(rottelpos_deg)
+    angle[use_rtp] = rottelpos_deg[use_rtp]
+    source[use_rtp] = ROTATOR_SOURCE_ROTTELPOS
+
+    use_cdb = (~use_rtp) & np.isfinite(consdb_deg)
+    angle[use_cdb] = consdb_deg[use_cdb]
+    source[use_cdb] = ROTATOR_SOURCE_CONSDB
+
+    return angle, source.astype(str)
 
 
 def merge_rotator_to_visit_info(rotator_df, visit_info, rotator_threshold):
-    """Add rotator_angle + rotator_flagged to visit_info only (no aosTable)."""
-    rot_angle_col, rot_flagged_col = _rotator_columns_for(
-        visit_info, rotator_df, want_flagged=True)
+    """Add rotator_angle, rotator_angle_source and rotator_flagged to
+    visit_info only (no aosTable).
+    """
+    rot_angle_col, source_col = resolve_rotator_angle(visit_info, rotator_df)
+    with np.errstate(invalid='ignore'):
+        rot_flagged_col = np.abs(rot_angle_col) > rotator_threshold
     visit_info['rotator_angle'] = rot_angle_col
+    visit_info['rotator_angle_source'] = source_col
     visit_info['rotator_flagged'] = rot_flagged_col
 
+    n_rtp = int(np.sum(source_col == ROTATOR_SOURCE_ROTTELPOS))
+    n_cdb = int(np.sum(source_col == ROTATOR_SOURCE_CONSDB))
+    n_none = int(np.sum(source_col == ROTATOR_SOURCE_MISSING))
     n_flagged = int(np.sum(rot_flagged_col))
-    print(f"Added rotator columns to visit_info. "
-          f"Flagged: {n_flagged} (|angle| > {rotator_threshold} deg)")
+    print(f"\nRotator angle sources (dimensionless visit counts): "
+          f"rotTelPos={n_rtp}, ConsDB={n_cdb}, missing={n_none}")
+    if n_none:
+        bad = [(int(d), int(s)) for d, s, src
+               in zip(visit_info['day_obs'], visit_info['seq_num'], source_col)
+               if src == ROTATOR_SOURCE_MISSING]
+        print(f"  rotator_angle is NaN on {n_none} visit(s), neither "
+              f"rotTelPos nor ConsDB available: {bad}")
+    print(f"Flagged (|rotator_angle| > {rotator_threshold} deg): {n_flagged}")
     return visit_info
 
 
@@ -2251,22 +2277,27 @@ def plot_visit_quality_diagnostics(visit_info, output_pdf=None,
 
 
 def merge_rotator_to_tables(rotator_df, aosTable, visit_info, rotator_threshold):
-    """Add rotator_angle and rotator_flagged to aosTable and visit_info."""
-    rot_angle_col, rot_flagged_col = _rotator_columns_for(
-        aosTable, rotator_df, want_flagged=True)
+    """Add rotator_angle and rotator_flagged to aosTable and visit_info.
+
+    The donut table carries no ``rotTelPos`` column of its own, so a row
+    resolves through ConsDB unless ``visit_info`` has already supplied the
+    angle; prefer `merge_rotator_to_visit_info`.
+    """
+    rot_angle_col, source_col = resolve_rotator_angle(aosTable, rotator_df)
+    with np.errstate(invalid='ignore'):
+        rot_flagged_col = np.abs(rot_angle_col) > rotator_threshold
     aosTable['rotator_angle'] = rot_angle_col
+    aosTable['rotator_angle_source'] = source_col
     aosTable['rotator_flagged'] = rot_flagged_col
 
     n_flagged = int(np.sum(rot_flagged_col))
     print(f"Added rotator columns to aosTable. "
           f"Flagged: {n_flagged} (|angle| > {rotator_threshold} deg)")
 
-    # Add rotator_angle to visit_info (angle only, no flag — preserves prior
-    # behaviour of this function).
     if visit_info is not None:
-        vi_angle, _ = _rotator_columns_for(
-            visit_info, rotator_df, want_flagged=False)
+        vi_angle, vi_source = resolve_rotator_angle(visit_info, rotator_df)
         visit_info['rotator_angle'] = vi_angle
+        visit_info['rotator_angle_source'] = vi_source
         print("Added rotator_angle to visit_info")
 
     return aosTable, visit_info
