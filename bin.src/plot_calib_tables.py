@@ -39,7 +39,8 @@ numpy/matplotlib/astropy — no LSST stack.
 Example::
 
     plot_calib_tables.py \
-        --tables-dir /sdf/group/rubin/repo/aos_imsim/gmegias/intrinsic_zernikes/v2 \
+        --tables-dir \
+        /sdf/group/rubin/repo/aos_imsim/gmegias/intrinsic_zernikes/v2 \
         --out intrinsic_zernikes_v2_maps.pdf
 """
 import argparse

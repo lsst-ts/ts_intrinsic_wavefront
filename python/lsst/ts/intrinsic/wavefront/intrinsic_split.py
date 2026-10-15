@@ -184,7 +184,8 @@ def sample_maps_polar(maps, X, Y, hole_dist=None):
         if hole_dist is not None:
             d, _ = cKDTree(pts).query(np.column_stack([X.ravel(), Y.ravel()]))
             v = v & (d.reshape(X.shape) <= hole_dist)
-        Zs.append(z); Vs.append(v)
+        Zs.append(z)
+        Vs.append(v)
     Z = np.stack(Zs)
     return Z, np.stack(Vs), int(np.isnan(Z).sum())
 
@@ -229,10 +230,12 @@ def decompose_polar_lsq(Z, valid, thetas_rad, A, s=1, m0_assignment='ocs',
             for m in ms:
                 cols += [np.cos(m * psi), np.sin(m * psi)]      # C
             rows.append(np.column_stack(cols))
-            rhs.append(Z[d, k, jj]); smp.append((d, jj))
+            rhs.append(Z[d, k, jj])
+            smp.append((d, jj))
         if not rows:
             continue
-        D = np.vstack(rows); y = np.concatenate(rhs)
+        D = np.vstack(rows)
+        y = np.concatenate(rhs)
         if D.shape[0] < D.shape[1]:                # under-determined ring
             continue
         DtD = D.T @ D
@@ -251,7 +254,8 @@ def decompose_polar_lsq(Z, valid, thetas_rad, A, s=1, m0_assignment='ocs',
                         for i in range(M))
         Crow = cC + sum(Ccs[i, 0] * np.cos(ms[i] * A) + Ccs[i, 1] * np.sin(ms[i] * A)
                         for i in range(M))
-        O_pol[k] = Orow; C_pol[k] = Crow
+        O_pol[k] = Orow
+        C_pol[k] = Crow
         dphi = A[1] - A[0]
         for (d, jj) in smp:
             shift = int(np.round(s * thetas_rad[d] / dphi))
@@ -421,11 +425,12 @@ def decompose_spin_lsq(Zc, valid, thetas_rad, A, n_spin=0, s=1, m_max=12,
     when rings are fully sampled.  Returns the same dict shape as
     :func:`decompose_spin_fft`, with ``res`` NaN at invalid nodes.
 
-    ``ocs_only=True`` fits the O (telescope) basis ALONE — the camera columns are
-    dropped from the design matrix, so O absorbs the rotator-averaged field and
-    ``C_pol`` is identically zero (a constrained fit, NOT a joint O+C fit with C
-    discarded afterward — the two differ when the joint fit puts signal in C).
-    The degenerate-mode redistribution is skipped (there is no C to assign to).
+    ``ocs_only=True`` fits the O (telescope) basis ALONE — the camera columns
+    are dropped from the design matrix, so O absorbs the rotator-averaged field
+    and ``C_pol`` is identically zero (a constrained fit, NOT a joint O+C fit
+    with C discarded afterward — the two differ when the joint fit puts signal
+    in C). The degenerate-mode redistribution is skipped (there is no C to
+    assign to).
 
     Field-edge null space (see the module docstring): each ring is solved with
     :func:`solve_ring_nullspace`, so directions the ring's coverage cannot
@@ -461,14 +466,17 @@ def decompose_spin_lsq(Zc, valid, thetas_rad, A, n_spin=0, s=1, m_max=12,
         for d in range(n_set):
             jj = np.nonzero(valid[d, k, :])[0]
             if jj.size:
-                phi.append(A[jj]); yk.append(Zc[d, k, jj])
-                thk.append(np.full(jj.size, thetas_rad[d])); idx.append((d, jj))
+                phi.append(A[jj])
+                yk.append(Zc[d, k, jj])
+                thk.append(np.full(jj.size, thetas_rad[d]))
+                idx.append((d, jj))
         if not phi:
             continue
         samples[k] = idx
         if coverage[k] < min_coverage:
             continue                                # continued radially below
-        phi = np.concatenate(phi); yk = np.concatenate(yk)
+        phi = np.concatenate(phi)
+        yk = np.concatenate(yk)
         thk = np.concatenate(thk)
         E = np.exp(1j * np.outer(phi, ms))                          # O basis
         if ocs_only:
@@ -485,13 +493,16 @@ def decompose_spin_lsq(Zc, valid, thetas_rad, A, n_spin=0, s=1, m_max=12,
         if ocs_only:
             Cfull = np.zeros(nm, complex)        # constrained: no camera term
         else:
-            Cfull = np.zeros(nm, complex); Cfull[keepC] = coef[nm:]
+            Cfull = np.zeros(nm, complex)
+            Cfull[keepC] = coef[nm:]
             # degenerate sum currently sits in O_{n_spin}; redistribute by flag
             i_n = int(np.nonzero(ms == int(n_spin))[0][0])
             if degen_assignment == 'ccs':
-                Cfull[i_n] = Ofull[i_n]; Ofull[i_n] = 0
+                Cfull[i_n] = Ofull[i_n]
+                Ofull[i_n] = 0
             elif degen_assignment == 'split':
-                Ofull[i_n] *= 0.5; Cfull[i_n] = Ofull[i_n]
+                Ofull[i_n] *= 0.5
+                Cfull[i_n] = Ofull[i_n]
         O_pol[k] = EA @ Ofull
         C_pol[k] = EA @ Cfull
     # Rings with data but too little azimuth coverage to fit: continue O and C
@@ -524,18 +535,20 @@ def decompose_spin_lsq(Zc, valid, thetas_rad, A, n_spin=0, s=1, m_max=12,
 
 
 def reconstruct_at(dec, theta_rad, A):
-    """Reconstruct the complex polar field at rotator angle ``theta_rad`` from a
+    """Reconstruct the complex polar field at rotator ``theta_rad`` from a
     decomposition dict (``O_pol``, ``C_pol``, ``n_spin``, ``s``).
 
-    Exactly the model that :func:`decompose_spin_lsq` / :func:`decompose_spin_fft`
-    use to form ``res`` (the per-dataset prediction)::
+    Exactly the model that :func:`decompose_spin_lsq` /
+    :func:`decompose_spin_fft` use to form ``res`` (the per-dataset
+    prediction)::
 
-        A(theta) = O_pol + exp(i*n_spin*s*theta) * roll(C_pol, round(s*theta/dphi))
+        A(theta) = O_pol + exp(i*n_spin*s*theta) * roll(C_pol,
+        round(s*theta/dphi))
 
     ``O_pol``/``C_pol`` are (n_r, n_az).  Returns a complex (n_r, n_az) field;
     take ``.real`` for a scalar/single Zernike, and ``.real``/``.imag`` for the
-    cos/sin members of a spin doublet.  ``A`` is the azimuth-sample array used in
-    the decomposition (its spacing sets ``dphi``).
+    cos/sin members of a spin doublet.  ``A`` is the azimuth-sample array used
+    in the decomposition (its spacing sets ``dphi``).
     """
     O_pol = np.asarray(dec['O_pol'])
     C_pol = np.asarray(dec['C_pol'])
@@ -594,7 +607,8 @@ def polar_field_to_points(field_pol, X, Y, thx, thy, nearest_within=None):
     from scipy.interpolate import LinearNDInterpolator
     pts = np.column_stack([X.ravel(), Y.ravel()])
     vals = np.asarray(field_pol).ravel()
-    thx = np.asarray(thx, float); thy = np.asarray(thy, float)
+    thx = np.asarray(thx, float)
+    thy = np.asarray(thy, float)
     out = LinearNDInterpolator(pts, vals)(thx, thy)
     if nearest_within is not None:
         miss = ~np.isfinite(out)

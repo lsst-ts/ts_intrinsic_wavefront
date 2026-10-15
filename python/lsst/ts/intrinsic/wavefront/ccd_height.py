@@ -36,16 +36,18 @@ from astropy.table import Table
 # Source: Guillem's estimate (≈ 0.15 μm Z4 per 10 μm of local height).
 HEIGHT_TO_Z4_UM_PER_MM = 15.0
 
-# Orientation mapping cameraGeom focal-plane mm -> the batoid_rubin per-detector
-# Bicubic height-map frame, as (swap_xy, sign_x, sign_y).  ESTABLISHED (not guessed)
-# by comparing batoid_rubin .sag against the LSST_FP_cold metrology surface over the
-# 4 corner-WFS rafts + a science CCD (R22S11): swap=True,+1,+1 gave 12415/12415 points
-# in-domain and the lowest RMS (1.0 μm).  See aos/wfs_ccd_height_compare.* .
+# Orientation mapping cameraGeom focal-plane mm -> the batoid_rubin
+# per-detector Bicubic height-map frame, as (swap_xy, sign_x, sign_y).
+# ESTABLISHED (not guessed) by comparing batoid_rubin .sag against the
+# LSST_FP_cold metrology surface over the 4 corner-WFS rafts + a science CCD
+# (R22S11): swap=True,+1,+1 gave 12415/12415 points in-domain and the lowest
+# RMS (1.0 μm).  See aos/wfs_ccd_height_compare.* .
 BATOID_FP_ORIENTATION = (True, 1, 1)
 
-# Corner-WFS nominal piston (mm): SW0 extra-focal +, SW1 intra-focal -.  Removed from
-# the metrology surface so its height is the figure deviation (consistent with the
-# at-focus science CCDs).  Verified by the same metrology-vs-batoid comparison.
+# Corner-WFS nominal piston (mm): SW0 extra-focal +, SW1 intra-focal -.
+# Removed from the metrology surface so its height is the figure deviation
+# (consistent with the at-focus science CCDs).  Verified by the same
+# metrology-vs-batoid comparison.
 WFS_DEFOCAL_MM = 1.5
 
 
@@ -106,7 +108,8 @@ def make_metrology_table(file, rsid=None, include_wfs=True):
     Parameters
     ----------
     file : str or Path
-        FITS file path (e.g. ``LSST_FP_cold_b_measurement_4col_bysurface.fits``).
+        FITS file path (e.g.
+        ``LSST_FP_cold_b_measurement_4col_bysurface.fits``).
     rsid : str, optional
         Restrict to a single raft-sensor identifier (e.g. ``'R22S11'``).
 
@@ -122,9 +125,10 @@ def make_metrology_table(file, rsid=None, include_wfs=True):
             extname = hdu.header.get('EXTNAME', '')
             if rsid is not None and extname != rsid:
                 continue
-            # science sensor 'R##S##'  or  corner-WFS 'R##WFS0/1' (det 'R##_SW0/1').
-            # The corner WFS sit at the nominal +/-WFS_DEFOCAL_MM piston, removed here
-            # so z is the figure deviation like the at-focus science CCDs.
+            # science sensor 'R##S##'  or  corner-WFS 'R##WFS0/1' (det
+            # 'R##_SW0/1'). The corner WFS sit at the nominal +/-WFS_DEFOCAL_MM
+            # piston, removed here so z is the figure deviation like the
+            # at-focus science CCDs.
             m_sci = re.fullmatch(r'R\d\dS\d\d', extname)
             m_wfs = re.fullmatch(r'R(\d\d)WFS([01])', extname)
             if m_sci:
@@ -187,7 +191,7 @@ def height_to_z4(height_mm, factor=HEIGHT_TO_Z4_UM_PER_MM):
 # ----------------------------------------------------------------------
 
 def ccd_centers_fp(camera):
-    """Return {detector_name: (cx_mm, cy_mm)} for every detector in `camera`."""
+    """Return {detector_name: (cx_mm, cy_mm)} for each `camera` detector."""
     from lsst.ts.intrinsic.wavefront.common.camera_utils import pixel_to_focal
 
     centers = {}

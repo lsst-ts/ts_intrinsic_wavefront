@@ -1,5 +1,6 @@
 """
-Utility functions for WCS, coordinate transforms, and rotator angle calculations.
+Utility functions for WCS, coordinate transforms, and rotator angle
+calculations.
 
 Provides functions to:
 - Convert between pixel and focal plane coordinates (via common.camera_utils)
