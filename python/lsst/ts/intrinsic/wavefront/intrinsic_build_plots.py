@@ -714,11 +714,17 @@ def plot_dof_median_summary(dof_per_iter, dof_labels, dof_units,
     iters = sorted(dof_per_iter.keys())
     medians = {it: np.nanmedian(dof_per_iter[it], axis=0) for it in iters}
 
-    # DOF index buckets
-    hex_trans_idx = [0, 1, 2,  5, 6, 7]               # M2 z/x/y, Cam z/x/y
-    hex_rot_idx   = [3, 4,     8, 9]                  # M2 rx/ry, Cam rx/ry
-    m1m3_idx      = list(range(10, 30))
-    m2_idx        = list(range(30, 50))
+    # DOF buckets keyed off the labels, not the global 50-DOF indices: a
+    # reduced DOF set passes only its own DOF, so `medians` and `dof_labels`
+    # are n_dof long and a global index runs off the end (22/12 is 10 rigid
+    # body + M1M3 bending 1-7 + M2 bending 1-5).
+    def _bucket(matches):
+        return [i for i, name in enumerate(dof_labels) if matches(name)]
+
+    hex_trans_idx = _bucket(lambda n: n.endswith(('_dz', '_dx', '_dy')))
+    hex_rot_idx   = _bucket(lambda n: n.endswith(('_rx', '_ry')))
+    m1m3_idx      = _bucket(lambda n: n.startswith('B1_'))
+    m2_idx        = _bucket(lambda n: n.startswith('B2_'))
 
     fig, axes = plt.subplots(4, 1, figsize=(15, 14),
                              layout='constrained',
@@ -734,6 +740,13 @@ def plot_dof_median_summary(dof_per_iter, dof_labels, dof_units,
         offsets = np.array([0.0])
 
     def _panel(ax, idx_list, title, y_unit):
+        if not idx_list:
+            # A DOF set that excludes a whole group, e.g. one with no M2
+            # bending modes, leaves its panel empty rather than failing.
+            ax.set_title(f'{title} (none in this DOF set)')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            return
         x = np.arange(len(idx_list))
         for xi in range(len(idx_list)):
             if xi % 2:
