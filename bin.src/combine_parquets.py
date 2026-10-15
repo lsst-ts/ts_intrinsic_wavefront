@@ -4,7 +4,8 @@
 Used by the Snakemake pipeline to combine per-chunk donut / fits / visits
 tables into a single param_set-level table.
 
-    python combine_parquets.py chunkA.parquet chunkB.parquet --output combined.parquet
+    python combine_parquets.py chunkA.parquet chunkB.parquet \
+        --output combined.parquet
 
 Streams one row group at a time (constant memory ~ a single row group), so it
 combines the large per-donut tables without loading everything into RAM —
@@ -12,13 +13,13 @@ important on the 16 GiB RSP allocation.
 
 Inputs come from the same run_mktable but can differ between chunks (processing
 drift): a chunk may lack optional columns (e.g. ``*_donut_id`` absent for some
-dates) or carry a different type (``zk_CCS`` as ``list<float>`` vs ``list<double>``;
-``model_flux`` as a per-stamp ``list<double>`` vs a bare scalar).  The combined
-schema keeps only the columns **present in every input with a reconcilable
-type** (numeric/list widths are promoted); columns absent from some input, or
-with irreconcilable types (e.g. list vs scalar), are **dropped with a note**.
-This guarantees a null-free, uniform output that the downstream astropy
-``QTable.read`` can parse (it chokes on null strings).
+dates) or carry a different type (``zk_CCS`` as ``list<float>`` vs
+``list<double>``; ``model_flux`` as a per-stamp ``list<double>`` vs a bare
+scalar).  The combined schema keeps only the columns **present in every input
+with a reconcilable type** (numeric/list widths are promoted); columns absent
+from some input, or with irreconcilable types (e.g. list vs scalar), are
+**dropped with a note**. This guarantees a null-free, uniform output that the
+downstream astropy ``QTable.read`` can parse (it chokes on null strings).
 """
 import argparse
 import os
@@ -94,7 +95,8 @@ def build_unified_schema(schemas):
 
 def conform_table(tbl, schema):
     """Reorder ``tbl`` to ``schema`` and cast columns whose type differs
-    (e.g. list<float> -> list<double>).  All schema columns are present in every
+    (e.g. list<float> -> list<double>).  All schema columns are present in
+    every
     input by construction, so no null-filling is needed."""
     data = {}
     for field in schema:

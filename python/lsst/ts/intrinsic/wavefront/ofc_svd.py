@@ -58,10 +58,10 @@ LABELS_50DOF = [
     'B2_16', 'B2_17', 'B2_18', 'B2_19', 'B2_20',
 ]
 DOF_UNITS_50 = (
-    ['μm', 'μm', 'μm', 'arcsec', 'arcsec'] +   # M2 hex
-    ['μm', 'μm', 'μm', 'arcsec', 'arcsec'] +   # Cam hex
-    ['μm'] * 20 +                                        # M1M3 bending
-    ['μm'] * 20                                          # M2 bending
+    ['μm', 'μm', 'μm', 'arcsec', 'arcsec']       # M2 hex
+    + ['μm', 'μm', 'μm', 'arcsec', 'arcsec']     # Cam hex
+    + ['μm'] * 20                                # M1M3 bending
+    + ['μm'] * 20                                # M2 bending
 )
 
 # Generic 0-based index groups into the 50-DOF vector.  ``hex_piston`` /
@@ -266,7 +266,7 @@ def project_dz_table(fit_table, prefix, svd):
 #   'rf'        — computed r_j * f_j                   (NOT unit-invariant)
 #   'r_only'    — range weights only:    n_j = r_j     (unit-invariant)
 #   'inv_f'     — inverse FWHM weights:  n_j = 1/f_j   (unit-invariant)
-#   'geom_mean' — geometric mean: n_j = sqrt(r_j/f_j)  (unit-invariant; default)
+# 'geom_mean' — geometric mean: n_j = sqrt(r_j/f_j)  (unit-invariant; default)
 #   'tunable'   — n_j = r_j**a * f_j**(a-1), a=`a`     (unit-invariant any a)
 NORM_SCHEMES = ('default', 'rf', 'r_only', 'inv_f', 'geom_mean', 'tunable')
 
@@ -279,9 +279,10 @@ def compute_normalization_components(ofc_data, dz_sensitivity_matrix,
                                      field_angles):
     """Range (r_j) and FWHM (f_j) normalization-weight components.
 
-    Mirrors ts_ofc ``generate_normalization_weights.compute_normalization_weights``:
-    ``r_j`` from hexapod stroke / bending-mode force range over the max
-    rotation-matrix element; ``f_j`` from the RSS of the FWHM sensitivity
+    Mirrors ts_ofc
+    ``generate_normalization_weights.compute_normalization_weights``: ``r_j``
+    from hexapod stroke / bending-mode force range over the max rotation-matrix
+    element; ``f_j`` from the RSS of the FWHM sensitivity
     (``convertZernikesToPsfWidth``) across field positions.  Imports
     ``lsst.ts.ofc`` / ``lsst.ts.wep`` lazily.  Returns ``(range_weights,
     fwhm_weights)``, each length ``n_dof`` (50).
@@ -337,7 +338,7 @@ def normalization_weights_by_scheme(scheme, range_weights=None,
 # Double-Zernike basis vectors (pupil Noll j x focal-plane Noll k)
 # ----------------------------------------------------------------------
 def focal_zernike_at_points(k_noll, rho, theta):
-    """Noll focal-plane Zernike ``Z_k`` (k = 1..6) at field points ``(rho, theta)``."""
+    """Noll focal-plane Zernike ``Z_k`` (k = 1..6) at ``(rho, theta)``."""
     rho = np.asarray(rho, dtype=float)
     theta = np.asarray(theta, dtype=float)
     if k_noll == 1:
@@ -356,11 +357,11 @@ def focal_zernike_at_points(k_noll, rho, theta):
 
 
 def make_dz_basis_vector(j_noll, k_fp, zn_array, fp_zernike_dict, n_fp, n_zernike):
-    """Double-Zernike basis vector: pupil Noll ``j_noll`` × focal-plane ``k_fp``.
+    """Double-Zernike basis vector: pupil ``j_noll`` × focal ``k_fp``.
 
     Places the focal-plane values ``fp_zernike_dict[k_fp]`` (one per field
-    position) at the ``j_noll`` slot of each field position's Zernike block, in a
-    flat vector of length ``n_fp * n_zernike`` (field-position outer, Zernike
+    position) at the ``j_noll`` slot of each field position's Zernike block, in
+    a flat vector of length ``n_fp * n_zernike`` (field-position outer, Zernike
     inner).  Returns None if ``j_noll`` is not in ``zn_array``.
     """
     match = np.where(np.asarray(zn_array) == j_noll)[0]
@@ -377,8 +378,8 @@ def make_dz_basis_vector(j_noll, k_fp, zn_array, fp_zernike_dict, n_fp, n_zernik
 def decompose_into_dz(z_vec, dz_vectors_dict):
     """Project ``z_vec`` onto each double-Zernike basis vector.
 
-    DZ basis vectors for distinct ``(j, k_fp)`` have non-overlapping support, so
-    each projection is ``(z·d)/(d·d)``.  Returns ``{(j, k_fp): coeff}``.
+    DZ basis vectors for distinct ``(j, k_fp)`` have non-overlapping support,
+    so each projection is ``(z·d)/(d·d)``.  Returns ``{(j, k_fp): coeff}``.
     """
     coeffs = {}
     for key, d in dz_vectors_dict.items():

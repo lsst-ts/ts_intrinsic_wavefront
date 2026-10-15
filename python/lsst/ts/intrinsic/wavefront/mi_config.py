@@ -34,7 +34,7 @@ def mi_names(param_set, config_path=None, doc=None):
 
 
 def load_mi_config(param_set, mi_name, config_path=None, doc=None):
-    """Fully merged config dict for one (param_set, mi_name): defaults + entry."""
+    """Merged config dict for one (param_set, mi_name): defaults + entry."""
     doc = doc or load_doc(config_path)
     defaults = doc.get('defaults', {})
     for e in doc.get('measured_intrinsics', {}).get(param_set, []):
@@ -115,14 +115,16 @@ def build_source(cfg, mi_name):
     """The mi_name whose build grids this entry's split should read.
 
     ``build_from`` lets a derived entry (e.g. a rotator-subset split) reuse a
-    parent entry's already-built per-rotator-bin grids instead of triggering its
+    parent entry's already-built per-rotator-bin grids instead of triggering
+    its
     own build.  Absent -> self."""
     return (cfg.get('build_from') or mi_name)
 
 
 def rotator_select(cfg):
     """Optional subset of rotator bins the split actually uses, as
-    [(lo, hi), ...].  Read from ``split.rotator_select``; None -> use all bins."""
+    [(lo, hi), ...].  Read from ``split.rotator_select``; None -> all bins.
+    """
     sel = (cfg.get('split') or {}).get('rotator_select')
     if not sel:
         return None
@@ -130,15 +132,19 @@ def rotator_select(cfg):
 
 
 def selected_rotator_bins(cfg):
-    """The entry's rotator bins, filtered by ``split.rotator_select`` if present
-    (else all bins).  Shared by run_intrinsic_split and the grid-reading study/wfs
-    scripts so they decompose/plot the same subset.  Raises if a selected bin is
+    """The entry's rotator bins, filtered by ``split.rotator_select`` if
+    present
+    (else all bins).  Shared by run_intrinsic_split and the grid-reading
+    study/wfs scripts so they decompose/plot the same subset.  Raises if a
+    selected bin is
     not one of the entry's rotator_bins (catches config typos)."""
     bins = rotator_bins(cfg)
     sel = rotator_select(cfg)
     if sel is None:
         return bins
-    key = lambda lo, hi: (round(lo, 3), round(hi, 3))
+
+    def key(lo, hi):
+        return (round(lo, 3), round(hi, 3))
     have = {key(lo, hi) for lo, hi in bins}
     missing = {key(lo, hi) for lo, hi in sel} - have
     if missing:
@@ -150,12 +156,14 @@ def selected_rotator_bins(cfg):
 def ocs_only_js(cfg, noll_list):
     """Set of Noll j for which the camera (CCS) term is forced to zero.
 
-    Resolution (split.* keys, later wins is not needed — they are alternatives):
+    Resolution (split.* keys, later wins is not needed — they are
+    alternatives):
       * ``split.split_js``  -> j to KEEP a full OCS/CCS split; all OTHERS in
         ``noll_list`` become OCS-only.  (Convenient "only split Z4..Z8" form.)
       * ``split.ocs_only``  -> explicit j to force OCS-only.
     If both are given, their effects are unioned (a j is OCS-only if it is in
-    ocs_only OR not in split_js).  Neither -> empty set (full split for all)."""
+    ocs_only OR not in split_js).  Neither -> empty set (full split).
+    """
     split = cfg.get('split') or {}
     noll = [int(j) for j in noll_list]
     out = set()

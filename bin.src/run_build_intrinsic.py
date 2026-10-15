@@ -4,13 +4,13 @@
 
 Faithful script port of build_measured_intrinsic.ipynb (Path A only): reads the
 Phase-1 combined ``output/<param_set>/{donuts,visits}.parquet``, filters visits
-to the rotator bin / bands, builds the OFC SVD (ofc_svd.build_ofc_svd), attaches
-per-donut CCD-height Z4, iterates the U-mode-constrained DZ removal
+to the rotator bin / bands, builds the OFC SVD (ofc_svd.build_ofc_svd),
+attaches per-donut CCD-height Z4, iterates the U-mode-constrained DZ removal
 (measured_intrinsic.build_measured_intrinsic_uconstrained), and writes:
 
-    <out>/intrinsic_grid.parquet   measured-intrinsic focal grid (+ z4_optical_OCS)
-    <out>/dz_fits.parquet          per-visit DZ fits + u/v-mode + DOF + FWHM cols
-    <out>/*.pdf                    validation, comparison, final-maps, CCS-binned
+    <out>/intrinsic_grid.parquet  measured-intrinsic grid (+ z4_optical_OCS)
+    <out>/dz_fits.parquet         per-visit DZ fits + u/v-mode + DOF + FWHM
+    <out>/*.pdf                   validation, comparison, final maps, CCS
 
 where <out> defaults to
     output/<param_set>/<mi_name>/build/rot_<rot_min>_<rot_max>/
@@ -278,7 +278,8 @@ def main():
     xbins, ybins = result['xbins'], result['ybins']
     print(f'  Path A: {n_iter} iters, {len(final["fit_rows"])} visits')
 
-    # ---- Z4 optical / height grids (per-donut subtraction before binning) ----
+    # ---- Z4 optical / height grids (per-donut subtraction before binning)
+    # ----
     z4_optical_grid = z4_height_ccs_grid = None
     if Z4hgt is not None and 4 in iZidx:
         gm = final.get('good_donut_mask', np.ones(len(donut_df), dtype=bool))
@@ -381,7 +382,8 @@ def _write_validation_pdf(path, result, donut_df, visits_kept, coord_sys, iZs,
     with PdfPages(str(path)) as pdf:
         def emit(fig):
             if fig is not None:
-                pdf.savefig(fig, bbox_inches='tight'); plt.close(fig)
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
 
         # A. SVD diagnostics + reachability (once; same for all rotator bins)
         emit(_svd_diagnostics_fig(U_eff, V, Sigma, frac_2d, n_k, n_j, iZs_arr,
@@ -440,7 +442,8 @@ def _write_validation_pdf(path, result, donut_df, visits_kept, coord_sys, iZs,
         if getattr(ibp, '_wep_ok', False):
             bad = {(int(r['day_obs']), int(r['seq_num'])) for r in nres['fit_rows']
                    if r.get('bad_fit')}
-            d_all = np.asarray(donut_df['day_obs']); s_all = np.asarray(donut_df['seq_num'])
+            d_all = np.asarray(donut_df['day_obs'])
+            s_all = np.asarray(donut_df['seq_num'])
             good = np.array([(int(d), int(s)) not in bad for d, s in zip(d_all, s_all)])
             fwhm = ibp.donut_fwhm_from_zk(residuals[good], list(iZs))
             txg = np.rad2deg(np.asarray(donut_df.loc[good, f'thx_{coord_sys}'], dtype=float))
@@ -501,25 +504,33 @@ def _svd_diagnostics_fig(U_eff, V, Sigma, frac_2d, n_k, n_j, iZs_arr, k_min,
     im = ax[0, 0].imshow(V[:, :n_show], aspect='auto', cmap='seismic',
                          vmin=-1, vmax=1)
     ax[0, 0].set_title('V (normalized DOF × v-mode)')
-    ax[0, 0].set_xlabel('v-mode'); ax[0, 0].set_ylabel('DOF')
+    ax[0, 0].set_xlabel('v-mode')
+    ax[0, 0].set_ylabel('DOF')
     yt = range(0, len(dof_labels), max(1, len(dof_labels) // 12))
-    ax[0, 0].set_yticks(list(yt)); ax[0, 0].set_yticklabels([dof_labels[i] for i in yt], fontsize=6)
+    ax[0, 0].set_yticks(list(yt))
+    ax[0, 0].set_yticklabels([dof_labels[i] for i in yt], fontsize=6)
     fig.colorbar(im, ax=ax[0, 0], shrink=0.8)
     ax[0, 1].semilogy(np.arange(1, len(Sigma) + 1), Sigma, 'o-', ms=4)
     ax[0, 1].axvline(len(keep_idx) + 0.5, color='green', alpha=0.6,
                      label=f'n_keep={len(keep_idx)}')
-    ax[0, 1].set_title('singular values σ'); ax[0, 1].set_xlabel('mode')
-    ax[0, 1].legend(fontsize=8); ax[0, 1].grid(alpha=0.3)
+    ax[0, 1].set_title('singular values σ')
+    ax[0, 1].set_xlabel('mode')
+    ax[0, 1].legend(fontsize=8)
+    ax[0, 1].grid(alpha=0.3)
     vmax = float(np.nanpercentile(np.abs(U_eff), 98)) or 1.0
     im = ax[1, 0].imshow(U_eff, aspect='auto', cmap='RdBu_r', vmin=-vmax, vmax=vmax)
-    ax[1, 0].set_title('U_eff (DZ row × u-mode)'); ax[1, 0].set_xlabel('u-mode')
-    ax[1, 0].set_ylabel('(k,j) row'); fig.colorbar(im, ax=ax[1, 0], shrink=0.8)
+    ax[1, 0].set_title('U_eff (DZ row × u-mode)')
+    ax[1, 0].set_xlabel('u-mode')
+    ax[1, 0].set_ylabel('(k,j) row')
+    fig.colorbar(im, ax=ax[1, 0], shrink=0.8)
     im = ax[1, 1].imshow(100.0 * frac_2d, aspect='auto', cmap='magma_r',
                          vmin=0, vmax=100)
     ax[1, 1].set_title('U² reachability f(k,j) [%]')
-    ax[1, 1].set_xticks(range(n_j)); ax[1, 1].set_xticklabels([f'Z{j}' for j in iZs_arr],
-                                                              rotation=90, fontsize=7)
-    ax[1, 1].set_yticks(range(n_k)); ax[1, 1].set_yticklabels([f'k={k_min+ki}' for ki in range(n_k)])
+    ax[1, 1].set_xticks(range(n_j))
+    ax[1, 1].set_xticklabels([f'Z{j}' for j in iZs_arr],
+                             rotation=90, fontsize=7)
+    ax[1, 1].set_yticks(range(n_k))
+    ax[1, 1].set_yticklabels([f'k={k_min+ki}' for ki in range(n_k)])
     fig.colorbar(im, ax=ax[1, 1], shrink=0.8)
     fig.suptitle('OFC SVD diagnostics', fontsize=13)
     return fig
@@ -536,9 +547,12 @@ def _reachability_fig(frac_2d, n_k, n_j, iZs_arr, k_min, n_keep_eff, threshold):
             v = 100.0 * frac_2d[ki, ji]
             ax.text(ji, ki, f'{v:4.0f}', ha='center', va='center', fontsize=6,
                     color='white' if v > 55 else 'black')
-    ax.set_xticks(range(n_j)); ax.set_xticklabels([f'Z{j}' for j in iZs_arr], fontsize=8)
-    ax.set_yticks(range(n_k)); ax.set_yticklabels([f'k={k_min+ki}' for ki in range(n_k)])
-    ax.set_xlabel('pupil Noll j'); ax.set_ylabel('focal Noll k')
+    ax.set_xticks(range(n_j))
+    ax.set_xticklabels([f'Z{j}' for j in iZs_arr], fontsize=8)
+    ax.set_yticks(range(n_k))
+    ax.set_yticklabels([f'k={k_min+ki}' for ki in range(n_k)])
+    ax.set_xlabel('pupil Noll j')
+    ax.set_ylabel('focal Noll k')
     ax.set_title(f'Reachability f(k,j)  (n_keep={n_keep_eff}, thr={threshold:g})')
     fig.colorbar(im, ax=ax, label='%')
     return fig
@@ -556,11 +570,13 @@ def _umode_stability_fig(A_prev, A_last, n_keep_eff, n_iter):
     for m in range(nrows * ncols):
         ax = axes[m]
         if m >= n_keep_eff:
-            ax.axis('off'); continue
+            ax.axis('off')
+            continue
         ax.plot(range(nv), A_prev[:, m], '.', ms=2, color='steelblue', alpha=0.6)
         ax.plot(range(nv), A_last[:, m], '.', ms=2.5, color='crimson', alpha=0.9)
         ax.axhline(0, color='k', lw=0.4, alpha=0.5)
-        ax.set_title(f'mode {m + 1}', fontsize=7); ax.grid(alpha=0.3)
+        ax.set_title(f'mode {m + 1}', fontsize=7)
+        ax.grid(alpha=0.3)
         ax.tick_params(labelsize=6)
     fig.suptitle(f'Path A U-mode amplitude stability — iter {n_iter-1} (blue) '
                  f'vs {n_iter} (red)', fontsize=11)
@@ -579,7 +595,8 @@ def _write_comparison_pdf(path, result, iZs, coord_sys, xbins, ybins):
                 result['tabulated_median'].get(j), xbins, ybins, coord_sys,
                 path_tag=' — Path A')
             if fig is not None:
-                pdf.savefig(fig, bbox_inches='tight'); plt.close(fig)
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
     print(f'  wrote {path.name}')
 
 
@@ -605,16 +622,19 @@ def _write_final_maps_pdf(path, grid, iZs, xbins, ybins, z4_optical_grid,
             axes = np.atleast_1d(axes).ravel()
             for ax, (title, g) in zip(axes, chunk):
                 if g is None:
-                    ax.set_visible(False); continue
+                    ax.set_visible(False)
+                    continue
                 finite = g[np.isfinite(g)]
                 vlim = (np.nanpercentile(np.abs(finite), 95) if finite.size else 1.0) or 1.0
                 pcm = ax.pcolormesh(xbins, ybins, g.T, cmap='RdBu_r',
                                     vmin=-vlim, vmax=vlim, shading='flat')
-                ax.set_aspect('equal'); ax.set_title(title, fontsize=9)
+                ax.set_aspect('equal')
+                ax.set_title(title, fontsize=9)
                 plt.colorbar(pcm, ax=ax, shrink=0.75)
             for ax in axes[len(chunk):]:
                 ax.set_visible(False)
-            pdf.savefig(fig, bbox_inches='tight'); plt.close(fig)
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
     print(f'  wrote {path.name}')
 
 

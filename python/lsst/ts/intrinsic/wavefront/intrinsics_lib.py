@@ -5,9 +5,9 @@ wavefront models, retrieves rotator angles and thermal data, and saves
 the results as HDF5 files.
 
 Usage from notebook:
-    from lsst.ts.intrinsic.wavefront.intrinsics_lib import run_mktable, PARAM_SETS
-    params = PARAM_SETS['fam_danish_triplets']
-    aosTable, visit_info = await run_mktable(**params, coord_sys='OCS')
+    from lsst.ts.intrinsic.wavefront.intrinsics_lib import run_mktable,
+    PARAM_SETS params = PARAM_SETS['fam_danish_triplets'] aosTable, visit_info
+    = await run_mktable(**params, coord_sys='OCS')
 
 Usage from CLI:
     python run_mktable.py --param-set fam_danish_triplets
@@ -29,7 +29,6 @@ from tqdm import tqdm
 
 # LSST imports (available on RSP)
 from lsst.daf.butler import Butler, DatasetNotFoundError
-import lsst.afw.cameraGeom as cameraGeom
 from lsst.obs.lsst import LsstCam
 from lsst.ts.wep.task.estimateZernikesDanishTask import EstimateZernikesDanishTask
 from lsst.ts.wep.task import CalcZernikesTask, CalcZernikesTaskConfig
@@ -395,8 +394,8 @@ def plot_visit_point(ax, x, y, style, band=None, dot_size_frac=None,
     st = dict(style)
     st.update(kwargs)
     out = list(ax.plot([x], [y], **st))
-    dot = visit_band_dot_style(band, host_size=st.get('markersize', 7),
-                              size_frac=dot_size_frac)
+    dot = visit_band_dot_style(
+        band, host_size=st.get('markersize', 7), size_frac=dot_size_frac)
     if dot is not None:
         dot['zorder'] = st.get('zorder', 2) + 0.1
         out += list(ax.plot([x], [y], **dot))
@@ -511,6 +510,7 @@ def markers_legend_figure(show_iter_distinction=False, show_band_legend=True,
             fontsize=10, color='gray')
     return fig
 
+
 # Per-visit quality cuts. Computed per visit during mktable, stored as
 # numeric columns in visit_info, and re-applied at use time via
 # quality_visit_mask(). A visit fails if any of these are violated.
@@ -556,7 +556,8 @@ def parse_collection_info(collections, include_versions=False):
     For a simple collection like 'aos_fam_danish_triplets':
         collection_phrase = 'aos_fam_danish_triplets', dates = (None, None)
 
-    For 'u/brycek/aos_fam_danish_step2/wep_v16_5_0/donut_viz_v3_2_3/20251020_20251231':
+    For the collection
+    'u/brycek/aos_fam_danish_step2/wep_v16_5_0/donut_viz_v3_2_3/20251020_20251231':
         - Drop leading 'u/USERNAME/'
         - collection_phrase = 'aos_fam_danish_step2'
         - Optionally append version strings if include_versions=True
@@ -672,8 +673,8 @@ def get_aggregate_zernikes(butler, day_obs, seq_num, coord_sys, camera,
     if fwhm is not None:
         fwhm_arr = np.array(fwhm)
         # Prefer the selected-length match: when no donuts are dropped
-        # len(aosTable) == len(aosTable_sel) and the array is already aligned to
-        # the selection, so applying `select` again would be wrong.
+        # len(aosTable) == len(aosTable_sel) and the array is already aligned
+        # to the selection, so applying `select` again would be wrong.
         if len(fwhm_arr) == len(aosTable_sel):
             aosTable_sel['blur'] = fwhm_arr
         elif len(fwhm_arr) == len(aosTable):
@@ -787,8 +788,8 @@ def _astropy_table_to_pyarrow(tbl):
         data = tbl[col]
         arr = np.asarray(data)
         if arr.ndim == 2:
-            # Per-row array column (e.g. zk_OCS shape (n, n_zk))
-            # Pass as a list of per-row numpy arrays; pyarrow infers list<float>
+            # Per-row array column (e.g. zk_OCS shape (n, n_zk)) Pass as a list
+            # of per-row numpy arrays; pyarrow infers list<float>
             rows = [np.ascontiguousarray(arr[i]) for i in range(arr.shape[0])]
             arrays.append(pa.array(rows))
         elif arr.dtype.kind == 'O':
@@ -997,7 +998,7 @@ def stream_zernikes_to_parquet(visit_pairs, collections, butler_repo, coord_sys,
                                matched_threshold_arcsec=DEFAULT_MATCHED_THRESHOLD_ARCSEC,
                                min_donuts_per_detector=DEFAULT_MIN_DONUTS_PER_DETECTOR,
                                workers=1):
-    """Stream aggregate Zernikes per visit to parquet (one row group per visit).
+    """Stream aggregate Zernikes per visit to parquet (a row group each).
 
     List/array columns (zk_OCS, zk_intrinsic_OCS, etc.) are stored as
     native parquet list<float> — no explode/restack, so the file is
@@ -1102,7 +1103,7 @@ def stream_zernikes_to_parquet(visit_pairs, collections, butler_repo, coord_sys,
     print(f"{'='*60}\n")
 
     if success_count == 0:
-        print(f"\nERROR: No Zernike data found for any visits!")
+        print("\nERROR: No Zernike data found for any visits!")
         print(f"Collections used: {collections}")
         return None
 
@@ -1179,7 +1180,7 @@ def get_zernikes_from_visits(visit_pairs, collections, butler_repo, coord_sys,
         success_count += 1
 
     print(f"\n{'='*60}")
-    print(f"Extraction Summary:")
+    print("Extraction Summary:")
     print(f"  Total visits attempted: {len(visit_pairs)}")
     print(f"  Successful extractions: {success_count}")
     print(f"  Failed extractions:     {error_count}")
@@ -1189,7 +1190,7 @@ def get_zernikes_from_visits(visit_pairs, collections, butler_repo, coord_sys,
         print(f"  nollIndices: {ref_noll_indices}")
 
     if len(agg_zernikes_list) == 0:
-        print(f"\nERROR: No Zernike data found for any visits!")
+        print("\nERROR: No Zernike data found for any visits!")
         print(f"Collections used: {collections}")
         return None, None
 
@@ -1659,13 +1660,13 @@ async def get_m1m3_gradients(efd_client, visit_table):
 def _thermal_from_consdb_transform(consdb_client, unique_visits):
     """ESS air temps (+delta-Ts) and TMA truss from the ConsDB transformed EFD.
 
-    One bulk query on ``efd_lsstcam.exposure_efd`` (per-exposure means) keyed by
-    ``exposure_id``, replacing the per-visit ESS/truss EFD loops (which do
-    ~4 + 2 EFD round-trips per visit).  Returns ``(temp_df, truss_df)`` keyed on
-    ``(day_obs, seq_num)``, or ``(None, None)`` if the ``exposure_id`` link or the
-    transform columns are unavailable -- the caller then falls back to the raw-EFD
-    per-visit path.  M1M3 gradients are NOT here (the thermocouple array is not in
-    the transform); those stay on the raw-EFD per-day path.
+    One bulk query on ``efd_lsstcam.exposure_efd`` (per-exposure means) keyed
+    by ``exposure_id``, replacing the per-visit ESS/truss EFD loops (which do
+    ~4 + 2 EFD round-trips per visit).  Returns ``(temp_df, truss_df)`` keyed
+    on ``(day_obs, seq_num)``, or ``(None, None)`` if the ``exposure_id`` link
+    or the transform columns are unavailable -- the caller then falls back to
+    the raw-EFD per-visit path.  M1M3 gradients are NOT here (the thermocouple
+    array is not in the transform); those stay on the raw-EFD per-day path.
     """
     if ('exposure_id' not in unique_visits
             or unique_visits['exposure_id'].isna().all()):
@@ -1743,9 +1744,10 @@ async def get_thermal_data(consdb_client, efd_client, visit_info,
     n_matched = vi_df['obs_start'].notna().sum()
     print(f"Matched obs times for {n_matched}/{len(vi_df)} visits")
 
-    # ESS air temps + TMA truss -- fast bulk read from the ConsDB transformed EFD
-    # (efd_lsstcam.exposure_efd per-exposure means), with the per-visit raw-EFD
-    # loops kept as a fallback for time ranges the transform doesn't cover.
+    # ESS air temps + TMA truss -- fast bulk read from the ConsDB transformed
+    # EFD (efd_lsstcam.exposure_efd per-exposure means), with the per-visit
+    # raw-EFD loops kept as a fallback for time ranges the transform doesn't
+    # cover.
     ess_sensors = {
         "cam_air_temp": 111,
         "m2_air_temp": 112,
@@ -1810,14 +1812,15 @@ async def get_thermal_data(consdb_client, efd_client, visit_info,
     # NaN, which is what we want.
     gradient_df = pd.concat(gradient_parts, ignore_index=True, sort=False)
 
-    # TMA truss temperatures (skip if the ConsDB transform already supplied them)
+    # TMA truss temperatures (skip if the ConsDB transform already supplied
+    # them)
     if truss_df is None:
         truss_sensors = {
             "tma_truss_temp_pxpy": ("temperatureItem6", 122),
             "tma_truss_temp_mxmy": ("temperatureItem7", 122),
         }
         truss_records = []
-        print(f"Querying TMA truss temperatures (per-visit fallback)...")
+        print("Querying TMA truss temperatures (per-visit fallback)...")
         for _, row in tqdm(unique_visits.iterrows(), total=len(unique_visits)):
             record = {"day_obs": row["day_obs"], "seq_num": row["seq_num"]}
             for name, (field, index) in truss_sensors.items():
@@ -1864,8 +1867,8 @@ def get_intrinsic_map(x, y, camera_id_map, band=BandLabel.LSST_I):
 
     binFactor = 2
     config.estimateZernikes.binning = binFactor
-    # Project convention: Noll 4-19, 22-26 (skip the spherical-defocus pair
-    # 20, 21).  Must stay in lockstep with create_intrinsic_interpolators, which
+    # Project convention: Noll 4-19, 22-26 (skip the spherical-defocus pair 20,
+    # 21).  Must stay in lockstep with create_intrinsic_interpolators, which
     # maps these rows back to Noll number positionally.
     nollIndices = np.array(list(range(4, 20)) + list(range(22, 27)))
     config.estimateZernikes.nollIndices = list(nollIndices)
@@ -2144,9 +2147,9 @@ def plot_visit_quality_diagnostics(visit_info, output_pdf=None,
     """Three-panel validation plot of per-visit quality metrics.
 
     Plots, vs visit ordinal (sorted day_obs, seq_num):
-      1. n_donuts                        + horizontal line at min_donuts_per_visit
-      2. n_detectors_with_min_donuts     + horizontal line at min_detectors_per_visit
-      3. median_blur_arcsec              + horizontal line at max_median_blur_arcsec
+      1. n_donuts                     + line at min_donuts_per_visit
+      2. n_detectors_with_min_donuts  + line at min_detectors_per_visit
+      3. median_blur_arcsec           + line at max_median_blur_arcsec
 
     Visits that pass all cuts are coloured blue; failing visits red.
 
@@ -2220,7 +2223,7 @@ def plot_visit_quality_diagnostics(visit_info, output_pdf=None,
                 continue
             cls = classifications[i]
             style = visit_marker_style(elev=cls['elev'], rot=cls['rot'],
-                                        band=cls['band'], base_size=7)
+                                       band=cls['band'], base_size=7)
             alpha = 0.95 if pass_mask[i] else 0.30
             ax.plot(x[i], y[i], alpha=alpha, **style)
 
@@ -2326,7 +2329,8 @@ def merge_program_reason_to_visit_info(visits_df, visit_info):
     lookup = {}
     for _, row in visits_df.iterrows():
         try:
-            d = int(row['day_obs']); s = int(row['seq_num'])
+            d = int(row['day_obs'])
+            s = int(row['seq_num'])
         except Exception:
             continue
         prog = str(row['science_program']) if has_program else ''
@@ -2447,7 +2451,6 @@ async def run_mktable(
         os.environ["no_proxy"] += ",.consdb"
 
     camera = LsstCam.getCamera()
-    camera_id_map = camera.getIdMap()
     if consdb_url is None:
         consdb_url = DEFAULT_CONSDB_URL
     # If using an external URL, embed token from ~/.lsst/consdb_token
@@ -2495,7 +2498,7 @@ async def run_mktable(
                 if Path(p).exists()]
     if existing and not overwrite:
         raise FileExistsError(
-            f"Output file(s) already exist — refusing to overwrite:\n  "
+            "Output file(s) already exist — refusing to overwrite:\n  "
             + "\n  ".join(existing)
             + "\nPass overwrite=True (or --overwrite from the CLI) to replace them.")
 
@@ -2622,7 +2625,7 @@ async def run_mktable(
         print(f"  thermocouples: {tc_meta_file} — {len(tc_meta)} thermocouples "
               f"(name, x, y, z, scanner)")
 
-    print(f"\nSaved:")
+    print("\nSaved:")
     print(f"  donuts: {output_file} (streamed, one row group per visit)")
     print(f"  visits: {visits_file} — {len(visit_info)} rows, "
           f"{len(visit_info.columns)} columns")

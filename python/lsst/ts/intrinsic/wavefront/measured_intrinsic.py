@@ -45,10 +45,8 @@ build_measured_intrinsic
 """
 
 from collections import defaultdict
-from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import pyarrow.parquet as pq
 import statsmodels.api as sm
 from astropy.table import QTable
@@ -69,7 +67,7 @@ except Exception:                                 # pragma: no cover
     def _tqdm(it, *args, **kwargs):                # noqa: ARG001
         return it
 
-from lsst.ts.intrinsic.wavefront.dz_fitting import focal_plane_zernike_basis, derive_noll_indices
+from lsst.ts.intrinsic.wavefront.dz_fitting import focal_plane_zernike_basis
 
 
 # ----------------------------------------------------------------------
@@ -227,7 +225,7 @@ def fit_dz_modes_per_visit(donut_df, visit_table, coord_sys, iZs,
         Per-donut data with columns:
           - day_obs, seq_num
           - thx_{coord_sys}, thy_{coord_sys}  (radians)
-          - zk_{coord_sys}, zk_intrinsic_{coord_sys}  (each is a list/array column)
+          - zk_{coord_sys}, zk_intrinsic_{coord_sys}  (list/array columns)
     visit_table : QTable or DataFrame
         Visit info (day_obs, seq_num) — used to keep visit ordering stable.
     coord_sys : str
@@ -357,7 +355,7 @@ def make_focal_grid(n_bins, fp_radius=1.8):
 
 
 def bin_median_focal(thx_deg, thy_deg, values_2d, iZidx, n_bins=73,
-                    fp_radius=1.8, statistic='median'):
+                     fp_radius=1.8, statistic='median'):
     """Bin per-donut values onto a (n_bins x n_bins) focal-plane grid.
 
     Parameters
@@ -498,13 +496,15 @@ def _grid_l2_change(g_new, g_old):
     cells (μm).  NaN if no overlap or no previous grid."""
     if g_old is None:
         return np.nan
-    num = 0.0; den = 0
+    num = 0.0
+    den = 0
     for j, a in g_new.items():
         b = g_old.get(j)
         if b is None:
             continue
         m = np.isfinite(a) & np.isfinite(b)
-        num += float(np.sum((a[m] - b[m]) ** 2)); den += int(m.sum())
+        num += float(np.sum((a[m] - b[m]) ** 2))
+        den += int(m.sum())
     return float(np.sqrt(num / den)) if den else np.nan
 
 
@@ -874,8 +874,8 @@ def build_measured_intrinsic_uconstrained(donut_df, visit_table,
                 zk_intrinsic_tab[good_donut_mask],
                 iZidx, n_bins=n_bins, fp_radius=fp_radius_grid)
         if it == n_iter - 1:
-            # per-cell donut count + RMS of the FINAL measured intrinsic, for the
-            # error on the (median) per-cell value (SE ≈ 1.2533·rms/√count)
+            # per-cell donut count + RMS of the FINAL measured intrinsic, for
+            # the error on the (median) per-cell value (SE ≈ 1.2533·rms/√count)
             measured_count, measured_rms, *_ = bin_count_rms_focal(
                 thx[good_donut_mask], thy[good_donut_mask],
                 wfd_subtracted[good_donut_mask],
