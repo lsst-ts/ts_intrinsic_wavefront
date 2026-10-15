@@ -7,17 +7,16 @@ Can be used as a library or via the companion CLI script run_dz_fit.py.
 """
 
 import numpy as np
-import pandas as pd
 import pyarrow.parquet as pq
 import statsmodels.api as sm
 from astropy.table import QTable, join
 from pathlib import Path
 
 
-
 # ============================================================
 # Noll index utilities
 # ============================================================
+
 
 def derive_noll_indices(nZk, noll_indices_arr=None):
     """Derive Noll Zernike indices and index mapping.
@@ -42,7 +41,7 @@ def derive_noll_indices(nZk, noll_indices_arr=None):
         if len(iZs) != nZk:
             print(f"WARNING: nollIndices length ({len(iZs)}) != zk array width ({nZk})")
             print(f"  nollIndices: {iZs}")
-            print(f"  Falling back to contiguous range")
+            print("  Falling back to contiguous range")
             iZs = list(range(4, 4 + nZk))
     else:
         if nZk == 19:
@@ -61,9 +60,9 @@ def derive_noll_indices(nZk, noll_indices_arr=None):
 def focal_plane_zernike_basis(thx_deg, thy_deg, max_noll, fp_radius=1.75):
     """Build focal-plane Noll Zernike basis matrix.
 
-    Coordinates are normalized to the focal-plane radius so that the
-    Zernike polynomials are evaluated on a unit disk.  All basis functions
-    are dimensionless, so fit coefficients have the same units as the data (μm).
+    Coordinates are normalized to the focal-plane radius so that the Zernike
+    polynomials are evaluated on a unit disk.  All basis functions are
+    dimensionless, so fit coefficients have the same units as the data (μm).
 
     Parameters
     ----------
@@ -232,11 +231,12 @@ def _fit_one_image(thx_deg, thy_deg, zk_data, zk_intrinsic, iZs,
 
 
 def _intrinsic_key(dobs, snum, det, cx, cy, cxe, cye):
-    # Round centroids to the nearest pixel: donuts are >> 1 px apart, so this is
-    # a unique key, while avoiding lookup misses from sub-LSB float drift across
-    # a parquet read/write round-trip (the old round(...,3) keyed on 0.001 px).
-    # Both intra- and extra-focal centroids are included so the key is unique
-    # even if two donuts in a visit+detector share a rounded intra centroid.
+    # Round centroids to the nearest pixel: donuts are >> 1 px apart, so this
+    # is a unique key, while avoiding lookup misses from sub-LSB float drift
+    # across a parquet read/write round-trip (the old round(...,3) keyed on
+    # 0.001 px). Both intra- and extra-focal centroids are included so the key
+    # is unique even if two donuts in a visit+detector share a rounded intra
+    # centroid.
     return (int(dobs), int(snum), str(det),
             round(float(cx)), round(float(cy)),
             round(float(cxe)), round(float(cye)))
@@ -256,10 +256,13 @@ def load_intrinsic_lookup(sidecar_path, iZs):
     col = [side_noll.index(int(j)) for j in iZs]      # reorder to fit iZs
     df = t.to_pandas()
     mi = np.stack(df['zk_intrinsic_MI'].values)[:, col]
-    dobs = df['day_obs'].to_numpy(); snum = df['seq_num'].to_numpy()
+    dobs = df['day_obs'].to_numpy()
+    snum = df['seq_num'].to_numpy()
     det = df['detector'].astype(str).to_numpy()
-    cx = df['centroid_x_intra'].to_numpy(float); cy = df['centroid_y_intra'].to_numpy(float)
-    cxe = df['centroid_x_extra'].to_numpy(float); cye = df['centroid_y_extra'].to_numpy(float)
+    cx = df['centroid_x_intra'].to_numpy(float)
+    cy = df['centroid_y_intra'].to_numpy(float)
+    cxe = df['centroid_x_extra'].to_numpy(float)
+    cye = df['centroid_y_extra'].to_numpy(float)
     return {_intrinsic_key(dobs[r], snum[r], det[r],
                            cx[r], cy[r], cxe[r], cye[r]): mi[r]
             for r in range(len(df))}
@@ -484,7 +487,7 @@ def fit_focal_scalar_streaming(input_file, visit_info, coord_sys,
 # ============================================================
 
 def flag_bad_fits(fit_table, prefix, threshold=2.0, min_donuts=200):
-    """Flag visits with bad fits based on coefficient magnitude and donut count.
+    """Flag visits with bad fits by coefficient magnitude and donut count.
 
     Parameters
     ----------
@@ -540,7 +543,8 @@ def flag_bad_fits(fit_table, prefix, threshold=2.0, min_donuts=200):
 def run_double_zernike_fits(input_file, coord_sys='OCS',
                             output_file=None, bad_fit_threshold=2.0,
                             min_donuts=200, visits_file=None,
-                            intrinsic_sidecar=None):
+                            intrinsic_sidecar=None, min_detectors=None,
+                            no_quality_cut=False):
     """Run the full Double Zernike fitting pipeline.
 
     Loads input HDF5 (donuts + visits tables), derives Noll indices,
@@ -560,6 +564,22 @@ def run_double_zernike_fits(input_file, coord_sys='OCS',
         Flag fits with |coefficient| > this (μm). Default 2.0.
     min_donuts : int
         Flag fits with fewer donuts than this. Default 200.
+    min_detectors : int or None
+        Opt-in override of the per-visit quality selection.  When None
+        (default) behavior is unchanged — the precomputed
+        ``visit_quality_pass`` column is used as-is (or ``quality_visit_mask``
+        with default thresholds).  When set, the mask is recomputed from the
+        metric columns with ``min_detectors_per_visit=min_detectors``, relaxing
+        ONLY the ``n_detectors_with_min_donuts`` cut (the n_donuts / blur cuts
+        keep their defaults) and bypassing the precomputed flag (which is fixed
+        at 170). Used by the bounce analysis to recover marginal low-CCD
+        visits; leave None for the MIW calibration and all other outputs.
+    no_quality_cut : bool
+        If True, fit EVERY visit and apply no per-visit quality cut here — the
+        metric columns (n_detectors_with_min_donuts, median_blur_arcsec,
+        visit_quality_pass) still travel in the output so each consumer can cut
+        as it needs ("fit all, cut at use").  Default False (unchanged
+        behavior). Takes precedence over min_detectors / visit_quality_pass.
 
     Returns
     -------
@@ -575,8 +595,9 @@ def run_double_zernike_fits(input_file, coord_sys='OCS',
 
     if is_parquet:
         # Resolve the visits sidecar.  An explicit visits_file wins; otherwise
-        # try the legacy <stem>_visits.parquet, then fall back to visits.parquet
-        # in the same directory (the Snakemake output/<ps>/chunks/<...>/ layout).
+        # try the legacy <stem>_visits.parquet, then fall back to
+        # visits.parquet in the same directory (the Snakemake
+        # output/<ps>/chunks/<...>/ layout).
         if visits_file is not None:
             visits_file = Path(visits_file)
         else:
@@ -598,7 +619,25 @@ def run_double_zernike_fits(input_file, coord_sys='OCS',
 
     # Apply per-visit quality cuts (n_donuts, n_detectors, median_blur_arcsec)
     # if those columns are present (mktable >= 2026-05-06).
-    if 'visit_quality_pass' in visit_info.colnames:
+    if no_quality_cut:
+        # Fit all visits; cuts are applied downstream at each consumer. The
+        # metric columns still travel in the output for that filtering.
+        print(f"  --no-quality-cut: keeping all {len(visit_info)} visits "
+              f"(per-visit cuts applied downstream)")
+    elif min_detectors is not None:
+        # Opt-in override (bounce): recompute the mask from the metric columns,
+        # relaxing ONLY the CCD-count cut to `min_detectors` and keeping the
+        # standard n_donuts / blur cuts.  Deliberately bypasses the precomputed
+        # visit_quality_pass (fixed at min_detectors=170) so this DOES NOT
+        # change the default path used by MIW calibration and every other
+        # output.
+        from lsst.ts.intrinsic.wavefront.intrinsics_lib import quality_visit_mask
+        keep = quality_visit_mask(visit_info, min_detectors_per_visit=min_detectors,
+                                  verbose=True)
+        print(f"  Per-visit quality cuts (min_detectors={min_detectors} override): "
+              f"{int(keep.sum())}/{len(visit_info)} visits pass")
+        visit_info = visit_info[keep]
+    elif 'visit_quality_pass' in visit_info.colnames:
         keep = np.asarray(visit_info['visit_quality_pass'], dtype=bool)
         n_pass = int(keep.sum())
         print(f"  Applying per-visit quality cuts: "

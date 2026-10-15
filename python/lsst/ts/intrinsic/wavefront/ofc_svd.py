@@ -58,10 +58,10 @@ LABELS_50DOF = [
     'B2_16', 'B2_17', 'B2_18', 'B2_19', 'B2_20',
 ]
 DOF_UNITS_50 = (
-    ['μm', 'μm', 'μm', 'arcsec', 'arcsec'] +   # M2 hex
-    ['μm', 'μm', 'μm', 'arcsec', 'arcsec'] +   # Cam hex
-    ['μm'] * 20 +                                        # M1M3 bending
-    ['μm'] * 20                                          # M2 bending
+    ['μm', 'μm', 'μm', 'arcsec', 'arcsec']       # M2 hex
+    + ['μm', 'μm', 'μm', 'arcsec', 'arcsec']     # Cam hex
+    + ['μm'] * 20                                # M1M3 bending
+    + ['μm'] * 20                                # M2 bending
 )
 
 # Generic 0-based index groups into the 50-DOF vector.  ``hex_piston`` /
@@ -167,6 +167,9 @@ class OFCSvd:
     vmode_labels: list = field(default_factory=list)
     dof_idx: list = field(default_factory=list)   # DOF indices (0-49) in the SVD
     keep_idx: list = field(default_factory=list)   # mode indices retained
+    # The ts_ofc DoubleZernikeStateEstimator this was decomposed by, for
+    # callers needing Range-Bounded Recovery or the DOF -> wavefront map.
+    estimator: object = None
 
     def _keep(self):
         return self.keep_idx if self.keep_idx else list(range(self.n_keep_eff))
@@ -202,43 +205,31 @@ def build_ofc_svd(iZs, k_min, k_max, n_keep, n_dof=None,
     the modes: an int ``n`` -> modes 0..n-1; a list -> exactly those mode
     indices (to drop individual v-modes).  Imports ``lsst.ts.ofc`` lazily.
     Returns an :class:`OFCSvd`.
+
+    The decomposition itself lives in ``ts_ofc`` as
+    `lsst.ts.ofc.DoubleZernikeStateEstimator`, so that ts_ofc holds the only
+    sensitivity-matrix SVD in the code base.  This function stays as the
+    adapter: it resolves the normalization yaml this package ships against (not
+    the one ts_ofc's configuration names) and returns the :class:`OFCSvd`
+    dataclass its callers expect.  Verified to reproduce the former in-module
+    SVD bit for bit.
     """
-    from lsst.ts.ofc import OFCData
+    from lsst.ts.ofc import DoubleZernikeStateEstimator, OFCData
 
     nw_full = load_normalization_weights(ofc_normalization_yaml, norm_yaml_name)
-    S_full = np.asarray(OFCData(instrument).sensitivity_matrix)
-    iZs_arr = np.asarray(iZs, dtype=int)
-    n_k = int(k_max) - int(k_min) + 1
-    n_j = len(iZs_arr)
-    S_slab = S_full[int(k_min):int(k_max) + 1, iZs_arr, :]   # (n_k, n_j, n_dof_full)
-    n_dof_full = S_slab.shape[-1]
+    estimator = DoubleZernikeStateEstimator(
+        OFCData(instrument), iZs, k_min, k_max, n_keep, n_dof=n_dof,
+        normalization_weights=nw_full)
 
-    if n_dof is None:
-        dof_idx = list(range(n_dof_full))
-    elif np.isscalar(n_dof):
-        dof_idx = list(range(int(n_dof)))
-    else:
-        dof_idx = sorted(int(d) for d in n_dof)
-    norm_sub = nw_full[dof_idx]
-    S = S_slab.reshape(-1, n_dof_full)[:, dof_idx] @ np.diag(norm_sub)
-    kj_grid = [(int(k_min + ki), int(iZs_arr[ji]))
-               for ki in range(n_k) for ji in range(n_j)]
-
-    U, Sigma, Vh = np.linalg.svd(S, full_matrices=False)
-    V = Vh.T
-    n_modes = U.shape[1]
-    if np.isscalar(n_keep):
-        keep_idx = list(range(min(int(n_keep), n_modes)))
-    else:
-        keep_idx = sorted(k for k in (int(x) for x in n_keep) if k < n_modes)
-    n_keep_eff = len(keep_idx)
     return OFCSvd(
-        U_eff=U[:, keep_idx], V=V, Sigma=Sigma,
-        normalization_weights=norm_sub, kj_grid=kj_grid,
-        n_keep_eff=n_keep_eff, k_min=int(k_min), k_max=int(k_max),
-        iZs=[int(j) for j in iZs_arr], n_dof=len(dof_idx),
-        vmode_labels=[f'v{m + 1}' for m in keep_idx],   # 1-based
-        dof_idx=dof_idx, keep_idx=keep_idx)
+        U_eff=estimator.U_eff, V=estimator.V, Sigma=estimator.Sigma,
+        normalization_weights=estimator.normalization_weights,
+        kj_grid=estimator.kj_grid, n_keep_eff=estimator.n_keep_eff,
+        k_min=int(k_min), k_max=int(k_max),
+        iZs=[int(j) for j in iZs], n_dof=estimator.n_dof,
+        vmode_labels=estimator.vmode_labels,
+        dof_idx=estimator.dof_idx, keep_idx=estimator.keep_idx,
+        estimator=estimator)
 
 
 def dz_table_to_W(fit_table, prefix, kj_grid):
@@ -275,7 +266,7 @@ def project_dz_table(fit_table, prefix, svd):
 #   'rf'        — computed r_j * f_j                   (NOT unit-invariant)
 #   'r_only'    — range weights only:    n_j = r_j     (unit-invariant)
 #   'inv_f'     — inverse FWHM weights:  n_j = 1/f_j   (unit-invariant)
-#   'geom_mean' — geometric mean: n_j = sqrt(r_j/f_j)  (unit-invariant; default)
+# 'geom_mean' — geometric mean: n_j = sqrt(r_j/f_j)  (unit-invariant; default)
 #   'tunable'   — n_j = r_j**a * f_j**(a-1), a=`a`     (unit-invariant any a)
 NORM_SCHEMES = ('default', 'rf', 'r_only', 'inv_f', 'geom_mean', 'tunable')
 
@@ -288,25 +279,18 @@ def compute_normalization_components(ofc_data, dz_sensitivity_matrix,
                                      field_angles):
     """Range (r_j) and FWHM (f_j) normalization-weight components.
 
-    Mirrors ts_ofc ``generate_normalization_weights.compute_normalization_weights``:
-    ``r_j`` from hexapod stroke / bending-mode force range over the max
-    rotation-matrix element; ``f_j`` from the RSS of the FWHM sensitivity
+    Mirrors ts_ofc
+    ``generate_normalization_weights.compute_normalization_weights``: ``r_j``
+    from hexapod stroke / bending-mode force range over the max rotation-matrix
+    element; ``f_j`` from the RSS of the FWHM sensitivity
     (``convertZernikesToPsfWidth``) across field positions.  Imports
     ``lsst.ts.ofc`` / ``lsst.ts.wep`` lazily.  Returns ``(range_weights,
     fwhm_weights)``, each length ``n_dof`` (50).
     """
-    from lsst.ts.ofc import BendModeToForce
     from lsst.ts.wep.utils import convertZernikesToPsfWidth
 
-    m1m3_bending_range = ofc_data.m1m3_force_range / 20
-    m2_bending_range = ofc_data.m2_force_range / 20
-    m1m3_bmf = BendModeToForce('M1M3', ofc_data)
-    m2_bmf = BendModeToForce('M2', ofc_data)
-    range_weights = np.concatenate((
-        ofc_data.rb_stroke,
-        m1m3_bending_range / np.max(np.abs(m1m3_bmf.rot_mat), axis=0),
-        m2_bending_range / np.max(np.abs(m2_bmf.rot_mat), axis=0),
-    ))
+    # r_j comes from ts_ofc, which owns the definition; see OFCData.dof_ranges.
+    range_weights = ofc_data.dof_ranges()
 
     sens = dz_sensitivity_matrix.evaluate(field_angles, rotation_angle=0.0)
     sens = sens[:, ofc_data.zn_idx, :]
@@ -354,7 +338,7 @@ def normalization_weights_by_scheme(scheme, range_weights=None,
 # Double-Zernike basis vectors (pupil Noll j x focal-plane Noll k)
 # ----------------------------------------------------------------------
 def focal_zernike_at_points(k_noll, rho, theta):
-    """Noll focal-plane Zernike ``Z_k`` (k = 1..6) at field points ``(rho, theta)``."""
+    """Noll focal-plane Zernike ``Z_k`` (k = 1..6) at ``(rho, theta)``."""
     rho = np.asarray(rho, dtype=float)
     theta = np.asarray(theta, dtype=float)
     if k_noll == 1:
@@ -373,11 +357,11 @@ def focal_zernike_at_points(k_noll, rho, theta):
 
 
 def make_dz_basis_vector(j_noll, k_fp, zn_array, fp_zernike_dict, n_fp, n_zernike):
-    """Double-Zernike basis vector: pupil Noll ``j_noll`` × focal-plane ``k_fp``.
+    """Double-Zernike basis vector: pupil ``j_noll`` × focal ``k_fp``.
 
     Places the focal-plane values ``fp_zernike_dict[k_fp]`` (one per field
-    position) at the ``j_noll`` slot of each field position's Zernike block, in a
-    flat vector of length ``n_fp * n_zernike`` (field-position outer, Zernike
+    position) at the ``j_noll`` slot of each field position's Zernike block, in
+    a flat vector of length ``n_fp * n_zernike`` (field-position outer, Zernike
     inner).  Returns None if ``j_noll`` is not in ``zn_array``.
     """
     match = np.where(np.asarray(zn_array) == j_noll)[0]
@@ -394,8 +378,8 @@ def make_dz_basis_vector(j_noll, k_fp, zn_array, fp_zernike_dict, n_fp, n_zernik
 def decompose_into_dz(z_vec, dz_vectors_dict):
     """Project ``z_vec`` onto each double-Zernike basis vector.
 
-    DZ basis vectors for distinct ``(j, k_fp)`` have non-overlapping support, so
-    each projection is ``(z·d)/(d·d)``.  Returns ``{(j, k_fp): coeff}``.
+    DZ basis vectors for distinct ``(j, k_fp)`` have non-overlapping support,
+    so each projection is ``(z·d)/(d·d)``.  Returns ``{(j, k_fp): coeff}``.
     """
     coeffs = {}
     for key, d in dz_vectors_dict.items():

@@ -20,7 +20,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Ingest generated MIW source tables into the Butler as ``IntrinsicZernikes``.
+r"""Ingest generated MIW tables into the Butler as ``IntrinsicZernikes``.
 
 Companion to ``run_make_calib_tables.py``.  Reads the single OCS table
 (``intrinsic_aberrations_OCS.parquet``) and the per-detector CCS tables
@@ -34,11 +34,12 @@ The ``intrinsicZernikes`` dataset type stays dimensioned ``(instrument,
 detector, physical_filter)`` — matching ts_wep's ``CalcZernikesTask`` lookup —
 so no ts_wep change is needed.
 
-This is the OCS-aware counterpart to ts_wep's ``ingestIntrinsicZernikes`` (which
-builds a CCS-only calibration from single-table sources already in a Butler
-collection).  Each built calibration is verified by default before any write
-(Noll indices present, CCS/OCS interpolators built, ``getIntrinsicZernikes``
-finite at interior sample points incl. the OCS rotation); a failure aborts the
+This is the OCS-aware counterpart to ts_wep's ``ingestIntrinsicZernikes``
+(which builds a CCS-only calibration from single-table sources already in a
+Butler collection).  Each built calibration is verified by default before any
+write (Noll indices present, CCS/OCS interpolators built,
+``getIntrinsicZernikes`` finite at interior sample points incl. the OCS
+rotation); a failure aborts the
 run.  Pass ``--no-verify`` to skip it.
 
 Defaults to ``--dry-run`` — it resolves, verifies and logs the plan but writes
@@ -48,8 +49,10 @@ Example (after reviewing the generated tables)::
 
     ingest_calib_tables.py \
         -b /repo/main \
-        --tables-dir /sdf/group/rubin/repo/aos_imsim/gmegias/intrinsic_zernikes/v2 \
-        --output-run LSSTCam/calib/DM-55048/intrinsicZernikes.v2/run.20260628 \
+        --tables-dir \
+        /sdf/group/rubin/repo/aos_imsim/gmegias/intrinsic_zernikes/v2 \
+        --output-run \
+        LSSTCam/calib/DM-55048/intrinsicZernikes.v2/run.20260628 \
         --certify-into LSSTCam/calib/DM-55048/intrinsicZernikes.v2 \
         --execute
 
@@ -74,7 +77,7 @@ _CCS_RE = re.compile(r"^intrinsic_aberrations_CCS_det(\d+)\.parquet$")
 
 
 def _discover_tables(tables_dir):
-    """Return (ocs_path, {detector_id: ccs_path}) from a generated tables dir."""
+    """Return (ocs_path, {detector_id: ccs_path}) from a tables dir."""
     d = Path(tables_dir)
     ocs = d / OCS_NAME
     if not ocs.exists():
@@ -90,7 +93,7 @@ def _discover_tables(tables_dir):
 
 
 def _verify_calib(calib, has_ocs):
-    """Sanity-check a freshly built ``IntrinsicZernikes``; return problem list."""
+    """Sanity-check a built ``IntrinsicZernikes``; return problems."""
     problems = []
     nz = np.asarray(calib.noll_indices)
     if nz.size == 0:
@@ -191,8 +194,9 @@ def main():
 
     ocs = Table.read(str(ocs_path), format="parquet")
 
-    # Build + verify every detector's calibration before touching the Butler, so
-    # a calibration that fails verification aborts before anything is written.
+    # Build + verify every detector's calibration before touching the Butler,
+    # so a calibration that fails verification aborts before anything is
+    # written.
     calibs = {}
     for det in detectors:
         ccs = Table.read(str(ccs_paths[det]), format="parquet")
