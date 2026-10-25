@@ -486,8 +486,14 @@ def fit_focal_scalar_streaming(input_file, visit_info, coord_sys,
 # Bad-fit flagging
 # ============================================================
 
-def flag_bad_fits(fit_table, prefix, threshold=2.0, min_donuts=200):
-    """Flag visits with bad fits by coefficient magnitude and donut count.
+def flag_bad_fits(fit_table, prefix, threshold=2.0, min_donuts=200,
+                  max_large_coeffs=5):
+    """Flag bad fits by the count of large coefficients and of donuts.
+
+    A fit is bad when more than `max_large_coeffs` coefficients exceed
+    `threshold` in absolute value, or when it has fewer than `min_donuts`
+    donuts. A few large coefficients are a real perturbation (a hexapod or
+    bending-mode scan); many are a broken fit.
 
     Parameters
     ----------
@@ -496,9 +502,12 @@ def flag_bad_fits(fit_table, prefix, threshold=2.0, min_donuts=200):
     prefix : str
         Fit prefix (e.g. 'z1toz3').
     threshold : float
-        Maximum allowed |coefficient| in μm (default 2.0).
+        |coefficient| above which a coefficient counts as large, μm
+        (default 2.0).
     min_donuts : int
         Minimum donuts required for a valid fit (default 200).
+    max_large_coeffs : int
+        Most large coefficients a good fit may have (default 5).
 
     Returns
     -------
@@ -508,7 +517,8 @@ def flag_bad_fits(fit_table, prefix, threshold=2.0, min_donuts=200):
     coeff_cols = [c for c in fit_table.colnames if c.startswith(f'{prefix}_z')
                   and '_c' in c and not c.endswith('_err') and not c.endswith('_scale')]
     coeff_arr = np.column_stack([np.array(fit_table[c]) for c in coeff_cols])
-    bad_coeff = np.any(np.abs(coeff_arr) > threshold, axis=1)
+    n_large = np.sum(np.abs(coeff_arr) > threshold, axis=1)
+    bad_coeff = n_large > max_large_coeffs
     bad_ndonuts = np.array(fit_table['n_donuts']) < min_donuts
     bad_mask = bad_coeff | bad_ndonuts
 
@@ -516,7 +526,7 @@ def flag_bad_fits(fit_table, prefix, threshold=2.0, min_donuts=200):
     n_bad_coeff = np.sum(bad_coeff & ~bad_ndonuts)
     n_bad_ndonuts = np.sum(bad_ndonuts)
     print(f"{prefix}: {n_bad}/{len(fit_table)} visits flagged as bad_fit")
-    print(f"  {n_bad_coeff} with |coeff| > {threshold} μm, "
+    print(f"  {n_bad_coeff} with more than {max_large_coeffs} |coeff| > {threshold} μm, "
           f"{n_bad_ndonuts} with n_donuts < {min_donuts}")
 
     if n_bad > 0:
@@ -527,9 +537,8 @@ def flag_bad_fits(fit_table, prefix, threshold=2.0, min_donuts=200):
             reasons = []
             if row['n_donuts'] < min_donuts:
                 reasons.append(f"n_donuts={row['n_donuts']}")
-            for c in coeff_cols:
-                if abs(row[c]) > threshold:
-                    reasons.append(f"{c}={row[c]:.3f}")
+            if bad_coeff[i]:
+                reasons.append(f"{n_large[i]} coefficients with |coeff| > {threshold} μm")
             print(f"  day_obs={row['day_obs']} seq_num={row['seq_num']}  "
                   + ', '.join(reasons))
 
@@ -542,7 +551,7 @@ def flag_bad_fits(fit_table, prefix, threshold=2.0, min_donuts=200):
 
 def run_double_zernike_fits(input_file, coord_sys='OCS',
                             output_file=None, bad_fit_threshold=2.0,
-                            min_donuts=200, visits_file=None,
+                            min_donuts=200, max_large_coeffs=5, visits_file=None,
                             intrinsic_sidecar=None, min_detectors=None,
                             no_quality_cut=False):
     """Run the full Double Zernike fitting pipeline.
@@ -561,9 +570,12 @@ def run_double_zernike_fits(input_file, coord_sys='OCS',
     output_file : str or Path, optional
         Output parquet path. If None, derived as {stem}_fits.parquet.
     bad_fit_threshold : float
-        Flag fits with |coefficient| > this (μm). Default 2.0.
+        |coefficient| above which a coefficient counts as large (μm).
+        Default 2.0.
     min_donuts : int
         Flag fits with fewer donuts than this. Default 200.
+    max_large_coeffs : int
+        Flag fits with more than this many large coefficients. Default 5.
     min_detectors : int or None
         Opt-in override of the per-visit quality selection.  When None
         (default) behavior is unchanged — the precomputed
@@ -717,9 +729,11 @@ def run_double_zernike_fits(input_file, coord_sys='OCS',
     fit_table_z6 = QTable(rows_z6)
 
     # Flag bad fits
-    bad_z3 = flag_bad_fits(fit_table_z3, 'z1toz3', bad_fit_threshold, min_donuts)
+    bad_z3 = flag_bad_fits(fit_table_z3, 'z1toz3', bad_fit_threshold, min_donuts,
+                           max_large_coeffs)
     fit_table_z3['z1toz3_bad_fit'] = bad_z3
-    bad_z6 = flag_bad_fits(fit_table_z6, 'z1toz6', bad_fit_threshold, min_donuts)
+    bad_z6 = flag_bad_fits(fit_table_z6, 'z1toz6', bad_fit_threshold, min_donuts,
+                           max_large_coeffs)
     fit_table_z6['z1toz6_bad_fit'] = bad_z6
 
     # Combine into single table

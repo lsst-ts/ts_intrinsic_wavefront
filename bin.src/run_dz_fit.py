@@ -33,7 +33,11 @@ def main():
     parser.add_argument('--coord-sys', default='OCS', choices=['OCS', 'CCS'],
                         help='Coordinate system (default: OCS)')
     parser.add_argument('--bad-fit-threshold', type=float, default=2.0,
-                        help='Flag fits with |coeff| > threshold μm (default: 2.0)')
+                        help='|coeff| above which a coefficient counts as large, μm '
+                             '(default: 2.0)')
+    parser.add_argument('--max-large-coeffs', type=int, default=5,
+                        help='Flag fits with more than this many large coefficients '
+                             '(default: 5)')
     parser.add_argument('--min-donuts', type=int, default=200,
                         help='Flag fits with fewer donuts (default: 200)')
     parser.add_argument('--min-detectors', type=int, default=None,
@@ -56,6 +60,7 @@ def main():
         output_file=args.output,
         bad_fit_threshold=args.bad_fit_threshold,
         min_donuts=args.min_donuts,
+        max_large_coeffs=args.max_large_coeffs,
         visits_file=args.visits,
         intrinsic_sidecar=args.intrinsic_sidecar,
         min_detectors=args.min_detectors,

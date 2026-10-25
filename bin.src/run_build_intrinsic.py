@@ -138,6 +138,7 @@ def main():
     fp_radius_grid = float(b['fp_radius_grid'])
     min_donuts = int(b['min_donuts'])
     bad_fit_threshold = float(b['bad_fit_threshold'])
+    max_large_coeffs = int(b.get('max_large_coeffs', 5))
     allowed_bands = mc.as_band_list(cfg.get('filter'))
     programs = cfg.get('programs')
     alt_min, alt_max = cfg.get('alt_min_deg'), cfg.get('alt_max_deg')
@@ -272,7 +273,8 @@ def main():
         donut_df, visits_kept, coord_sys, iZs, kj_grid=kj_grid, U_eff=U_eff,
         n_iter=n_iter, n_bins=n_bins, fp_radius_basis=fp_radius_basis,
         fp_radius_grid=fp_radius_grid, min_donuts=min_donuts,
-        bad_fit_threshold=bad_fit_threshold, rbr_estimator=rbr_estimator,
+        bad_fit_threshold=bad_fit_threshold, max_large_coeffs=max_large_coeffs,
+        rbr_estimator=rbr_estimator,
         rbr_full_dof=rbr_full_dof)
     final = result['iter_results'][-1]
     xbins, ybins = result['xbins'], result['ybins']

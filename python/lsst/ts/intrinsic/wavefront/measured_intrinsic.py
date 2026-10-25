@@ -461,13 +461,14 @@ def interpolate_grid_at_donuts(grid, xcent, ycent, thx_deg, thy_deg, iZs,
 # High-level driver: 2-iteration measured-intrinsic build
 # ----------------------------------------------------------------------
 
-def _flag_bad_visits(fit_rows, by_pupil, threshold, min_donuts):
+def _flag_bad_visits(fit_rows, by_pupil, threshold, min_donuts,
+                     max_large_coeffs=5):
     """Set fit_rows[i]['bad_fit'] = True for visits failing quality cuts.
 
     Bad if either:
       * n_donuts < min_donuts, OR
-      * |dz_z{j}_c{k}| > threshold (μm) for any (k, j) in the spec
-        (NaN coefficients also count as bad).
+      * more than `max_large_coeffs` of the (k, j) in the spec have
+        |dz_z{j}_c{k}| > threshold (μm), or any coefficient is NaN.
 
     Returns the list of (day_obs, seq_num) pairs flagged bad.
     """
@@ -477,14 +478,10 @@ def _flag_bad_visits(fit_rows, by_pupil, threshold, min_donuts):
         if int(r.get('n_donuts', 0)) < min_donuts:
             bad_flag = True
         else:
-            for j, ks in by_pupil.items():
-                for k in ks:
-                    val = r.get(f'dz_z{j}_c{k}', np.nan)
-                    if not np.isfinite(val) or abs(float(val)) > threshold:
-                        bad_flag = True
-                        break
-                if bad_flag:
-                    break
+            vals = np.array([float(r.get(f'dz_z{j}_c{k}', np.nan))
+                             for j, ks in by_pupil.items() for k in ks])
+            bad_flag = bool(np.any(~np.isfinite(vals))
+                            or np.sum(np.abs(vals) > threshold) > max_large_coeffs)
         r['bad_fit'] = bool(bad_flag)
         if bad_flag:
             bad.append((int(r['day_obs']), int(r['seq_num'])))
@@ -530,6 +527,7 @@ def build_measured_intrinsic(donut_df, visit_table, coord_sys, iZs,
                              fp_radius_grid=1.8,
                              min_donuts=500,
                              bad_fit_threshold=2.0,
+                             max_large_coeffs=5,
                              data_offset=None,
                              intrinsic_offset=None,
                              converge_tol=1e-3):
@@ -537,7 +535,8 @@ def build_measured_intrinsic(donut_df, visit_table, coord_sys, iZs,
 
     Per-visit quality cuts (matching run_pipeline's fit step):
       * `min_donuts` — require at least this many donuts per visit
-      * `bad_fit_threshold` — flag a visit if any |coeff| > this (μm)
+      * `bad_fit_threshold`, `max_large_coeffs` — flag a visit if more than
+        `max_large_coeffs` coefficients have |coeff| > `bad_fit_threshold` (μm)
     Donuts from bad-fit visits are excluded from the median grid.
 
     Per-pupil offsets (subtracted from zk arrays before any binning or
@@ -620,7 +619,7 @@ def build_measured_intrinsic(donut_df, visit_table, coord_sys, iZs,
 
         # 2. Flag bad visits using *this* iteration's fits
         bad_visits = _flag_bad_visits(fit_rows, by_pupil,
-                                      bad_fit_threshold, min_donuts)
+                                      bad_fit_threshold, min_donuts, max_large_coeffs)
         bad_set = set(bad_visits)
 
         # 3. Per-donut good-mask: drop donuts from any bad-flagged visit
@@ -765,6 +764,7 @@ def build_measured_intrinsic_uconstrained(donut_df, visit_table,
                                           fp_radius_grid=1.8,
                                           min_donuts=500,
                                           bad_fit_threshold=2.0,
+                                          max_large_coeffs=5,
                                           data_offset=None,
                                           intrinsic_offset=None,
                                           converge_tol=1e-3,
@@ -849,7 +849,7 @@ def build_measured_intrinsic_uconstrained(donut_df, visit_table,
                 iZidx, fp_radius_basis)
 
         bad_visits = _flag_bad_visits(
-            fit_rows_proj, by_pupil, bad_fit_threshold, min_donuts)
+            fit_rows_proj, by_pupil, bad_fit_threshold, min_donuts, max_large_coeffs)
         bad_set = set(bad_visits)
         good_donut_mask = np.array([
             (int(d), int(s)) not in bad_set
