@@ -45,10 +45,8 @@ build_measured_intrinsic
 """
 
 from collections import defaultdict
-from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import pyarrow.parquet as pq
 import statsmodels.api as sm
 from astropy.table import QTable
@@ -69,7 +67,7 @@ except Exception:                                 # pragma: no cover
     def _tqdm(it, *args, **kwargs):                # noqa: ARG001
         return it
 
-from lsst.ts.intrinsic.wavefront.dz_fitting import focal_plane_zernike_basis, derive_noll_indices
+from lsst.ts.intrinsic.wavefront.dz_fitting import focal_plane_zernike_basis
 
 
 # ----------------------------------------------------------------------
@@ -227,7 +225,7 @@ def fit_dz_modes_per_visit(donut_df, visit_table, coord_sys, iZs,
         Per-donut data with columns:
           - day_obs, seq_num
           - thx_{coord_sys}, thy_{coord_sys}  (radians)
-          - zk_{coord_sys}, zk_intrinsic_{coord_sys}  (each is a list/array column)
+          - zk_{coord_sys}, zk_intrinsic_{coord_sys}  (list/array columns)
     visit_table : QTable or DataFrame
         Visit info (day_obs, seq_num) — used to keep visit ordering stable.
     coord_sys : str
@@ -357,7 +355,7 @@ def make_focal_grid(n_bins, fp_radius=1.8):
 
 
 def bin_median_focal(thx_deg, thy_deg, values_2d, iZidx, n_bins=73,
-                    fp_radius=1.8, statistic='median'):
+                     fp_radius=1.8, statistic='median'):
     """Bin per-donut values onto a (n_bins x n_bins) focal-plane grid.
 
     Parameters
@@ -463,13 +461,14 @@ def interpolate_grid_at_donuts(grid, xcent, ycent, thx_deg, thy_deg, iZs,
 # High-level driver: 2-iteration measured-intrinsic build
 # ----------------------------------------------------------------------
 
-def _flag_bad_visits(fit_rows, by_pupil, threshold, min_donuts):
+def _flag_bad_visits(fit_rows, by_pupil, threshold, min_donuts,
+                     max_large_coeffs=5):
     """Set fit_rows[i]['bad_fit'] = True for visits failing quality cuts.
 
     Bad if either:
       * n_donuts < min_donuts, OR
-      * |dz_z{j}_c{k}| > threshold (μm) for any (k, j) in the spec
-        (NaN coefficients also count as bad).
+      * more than `max_large_coeffs` of the (k, j) in the spec have
+        |dz_z{j}_c{k}| > threshold (μm), or any coefficient is NaN.
 
     Returns the list of (day_obs, seq_num) pairs flagged bad.
     """
@@ -479,14 +478,10 @@ def _flag_bad_visits(fit_rows, by_pupil, threshold, min_donuts):
         if int(r.get('n_donuts', 0)) < min_donuts:
             bad_flag = True
         else:
-            for j, ks in by_pupil.items():
-                for k in ks:
-                    val = r.get(f'dz_z{j}_c{k}', np.nan)
-                    if not np.isfinite(val) or abs(float(val)) > threshold:
-                        bad_flag = True
-                        break
-                if bad_flag:
-                    break
+            vals = np.array([float(r.get(f'dz_z{j}_c{k}', np.nan))
+                             for j, ks in by_pupil.items() for k in ks])
+            bad_flag = bool(np.any(~np.isfinite(vals))
+                            or np.sum(np.abs(vals) > threshold) > max_large_coeffs)
         r['bad_fit'] = bool(bad_flag)
         if bad_flag:
             bad.append((int(r['day_obs']), int(r['seq_num'])))
@@ -498,13 +493,15 @@ def _grid_l2_change(g_new, g_old):
     cells (μm).  NaN if no overlap or no previous grid."""
     if g_old is None:
         return np.nan
-    num = 0.0; den = 0
+    num = 0.0
+    den = 0
     for j, a in g_new.items():
         b = g_old.get(j)
         if b is None:
             continue
         m = np.isfinite(a) & np.isfinite(b)
-        num += float(np.sum((a[m] - b[m]) ** 2)); den += int(m.sum())
+        num += float(np.sum((a[m] - b[m]) ** 2))
+        den += int(m.sum())
     return float(np.sqrt(num / den)) if den else np.nan
 
 
@@ -530,6 +527,7 @@ def build_measured_intrinsic(donut_df, visit_table, coord_sys, iZs,
                              fp_radius_grid=1.8,
                              min_donuts=500,
                              bad_fit_threshold=2.0,
+                             max_large_coeffs=5,
                              data_offset=None,
                              intrinsic_offset=None,
                              converge_tol=1e-3):
@@ -537,7 +535,8 @@ def build_measured_intrinsic(donut_df, visit_table, coord_sys, iZs,
 
     Per-visit quality cuts (matching run_pipeline's fit step):
       * `min_donuts` — require at least this many donuts per visit
-      * `bad_fit_threshold` — flag a visit if any |coeff| > this (μm)
+      * `bad_fit_threshold`, `max_large_coeffs` — flag a visit if more than
+        `max_large_coeffs` coefficients have |coeff| > `bad_fit_threshold` (μm)
     Donuts from bad-fit visits are excluded from the median grid.
 
     Per-pupil offsets (subtracted from zk arrays before any binning or
@@ -620,7 +619,7 @@ def build_measured_intrinsic(donut_df, visit_table, coord_sys, iZs,
 
         # 2. Flag bad visits using *this* iteration's fits
         bad_visits = _flag_bad_visits(fit_rows, by_pupil,
-                                      bad_fit_threshold, min_donuts)
+                                      bad_fit_threshold, min_donuts, max_large_coeffs)
         bad_set = set(bad_visits)
 
         # 3. Per-donut good-mask: drop donuts from any bad-flagged visit
@@ -720,19 +719,37 @@ def _dz_contrib_from_params(params, by_pupil, thx_deg, thy_deg,
     return dz_contrib
 
 
-def _apply_uconstraint(params, kj_grid, U_eff):
+def _apply_uconstraint(params, kj_grid, U_eff, rbr_estimator=None,
+                       rbr_full_dof=False):
     """Project a per-(k, j) coefficient dict onto the first ``n_keep``
     U-modes.  Returns (params_proj, w_raw, w_proj) where the raw and
     projected coefficient vectors are in the row order of `kj_grid`.
 
     `kj_grid` is a list of ``(k, j)`` tuples whose order must match the
     rows of `U_eff` (i.e. how `S` was flattened before the SVD).
+
+    With `rbr_estimator` given -- a `lsst.ts.ofc.DoubleZernikeStateEstimator`
+    -- the subtracted wavefront is instead what a *range-bounded* optical
+    state reproduces: recover the degrees of freedom (DOF) under Range-Bounded
+    Recovery (RBR), then map them forward.  The u-mode projection is the
+    penalty-off limit of that, but is not computed that way here: the round
+    trip through DOF and back differs from the direct projection at the 1e-14
+    um level, and the unconstrained build has to stay reproducible.
+
+    `rbr_full_dof` solves over every DOF with the barrier as the only
+    regularizer instead of inside the retained-mode subspace.  Use it with
+    every mode retained -- the "50/50 RBR" scheme -- where mode truncation is
+    meant to play no part.
     """
     w = np.array([float(params.get(f'dz_z{j}_c{k}', np.nan))
                   for k, j in kj_grid])
     finite = np.isfinite(w)
     w_use = np.where(finite, w, 0.0)
-    w_proj = U_eff @ (U_eff.T @ w_use)
+    if rbr_estimator is not None:
+        w_proj = rbr_estimator.wavefront_from_dof(
+            rbr_estimator.dof_range_bounded(w_use, full_dof=rbr_full_dof))
+    else:
+        w_proj = U_eff @ (U_eff.T @ w_use)
     out = dict(params)
     for idx, (k, j) in enumerate(kj_grid):
         out[f'dz_z{j}_c{k}'] = float(w_proj[idx])
@@ -747,9 +764,12 @@ def build_measured_intrinsic_uconstrained(donut_df, visit_table,
                                           fp_radius_grid=1.8,
                                           min_donuts=500,
                                           bad_fit_threshold=2.0,
+                                          max_large_coeffs=5,
                                           data_offset=None,
                                           intrinsic_offset=None,
-                                          converge_tol=1e-3):
+                                          converge_tol=1e-3,
+                                          rbr_estimator=None,
+                                          rbr_full_dof=False):
     """U-mode-constrained variant of `build_measured_intrinsic`.
 
     For each visit, fit *all* (k, j) DZ coefficients in `kj_grid`,
@@ -802,6 +822,8 @@ def build_measured_intrinsic_uconstrained(donut_df, visit_table,
     print(f"U-constrained DZ fit:  "
           f"{n_modes} (k,j) modes total; U_eff = {U_eff.shape}  "
           f"(n_keep = {U_eff.shape[1]})")
+    print(f"  state recovery: "
+          f"{'range-bounded (RBR)' if rbr_estimator is not None else 'truncated SVD'}")
 
     for it in range(n_iter):
         fit_rows_proj = []
@@ -819,14 +841,15 @@ def build_measured_intrinsic_uconstrained(donut_df, visit_table,
                 dobs, snum, img_idx)
             fit_rows_raw.append(params_raw)
             params_proj, _w, _w_p = _apply_uconstraint(
-                params_raw, kj_grid, U_eff)
+                params_raw, kj_grid, U_eff, rbr_estimator=rbr_estimator,
+                rbr_full_dof=rbr_full_dof)
             fit_rows_proj.append(params_proj)
             dz_contrib[mask] = _dz_contrib_from_params(
                 params_proj, by_pupil, thx[mask], thy[mask],
                 iZidx, fp_radius_basis)
 
         bad_visits = _flag_bad_visits(
-            fit_rows_proj, by_pupil, bad_fit_threshold, min_donuts)
+            fit_rows_proj, by_pupil, bad_fit_threshold, min_donuts, max_large_coeffs)
         bad_set = set(bad_visits)
         good_donut_mask = np.array([
             (int(d), int(s)) not in bad_set
@@ -851,8 +874,8 @@ def build_measured_intrinsic_uconstrained(donut_df, visit_table,
                 zk_intrinsic_tab[good_donut_mask],
                 iZidx, n_bins=n_bins, fp_radius=fp_radius_grid)
         if it == n_iter - 1:
-            # per-cell donut count + RMS of the FINAL measured intrinsic, for the
-            # error on the (median) per-cell value (SE ≈ 1.2533·rms/√count)
+            # per-cell donut count + RMS of the FINAL measured intrinsic, for
+            # the error on the (median) per-cell value (SE ≈ 1.2533·rms/√count)
             measured_count, measured_rms, *_ = bin_count_rms_focal(
                 thx[good_donut_mask], thy[good_donut_mask],
                 wfd_subtracted[good_donut_mask],

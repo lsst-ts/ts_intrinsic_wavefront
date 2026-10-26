@@ -1,28 +1,23 @@
 """Diagnostic plots and analysis helpers for building the measured intrinsic.
 
-Extracted verbatim from build_measured_intrinsic.ipynb so the build can run as a
-script (run_build_intrinsic.py).  Pure plotting + per-visit analysis helpers;
+Extracted verbatim from build_measured_intrinsic.ipynb so the build can run as
+a script (run_build_intrinsic.py).  Pure plotting + per-visit analysis helpers;
 the numeric core lives in measured_intrinsic.py and ofc_svd.py.  RSP-only
 (needs the LSST stack via the imports below).
 """
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.colors import TwoSlopeNorm
-from matplotlib.lines import Line2D
 from pathlib import Path
-from scipy.stats import binned_statistic, binned_statistic_2d
 
-from lsst.ts.intrinsic.wavefront.common.zernike_names import (
-    NOLL_NAMES, NOLL_FORMULAS, FOCAL_NAMES, PUPIL_NAMES)
-from lsst.ts.intrinsic.wavefront.measured_intrinsic import bin_median_focal, interpolate_grid_at_donuts
-from lsst.ts.intrinsic.wavefront.ofc_svd import (
-    recover_dof_per_visit, vmode_fwhm_scale, LABELS_50DOF, DOF_UNITS_50)
+from lsst.ts.intrinsic.wavefront.common.zernike_names import PUPIL_NAMES
+from lsst.ts.intrinsic.wavefront.measured_intrinsic import (
+    bin_median_focal, interpolate_grid_at_donuts)
 
 try:
-    from lsst.ts.intrinsic.wavefront.intrinsics_lib import (classify_visit, visit_marker_style,
-                                build_visit_marker_lookup, markers_legend_figure)
+    from lsst.ts.intrinsic.wavefront.intrinsics_lib import (
+        classify_visit, visit_marker_style,
+        build_visit_marker_lookup, markers_legend_figure)
 except Exception:  # marker styling is optional for the plots
     classify_visit = visit_marker_style = build_visit_marker_lookup = None
     markers_legend_figure = None
@@ -47,7 +42,6 @@ DOF_GROUPS = [
     ('M2',       30, 50),
 ]
 _WFS_EDGE_CACHE = {}
-
 
 
 def _per_j_panel_layout(iZs_arr):
@@ -95,10 +89,14 @@ def _one_based_xticks(ax, n_modes, step=None):
 def _elev_group(alt_deg):
     if not np.isfinite(alt_deg):
         return 'unknown'
-    if alt_deg < 35: return '<35'
-    if alt_deg < 50: return '35-50'
-    if alt_deg < 65: return '50-65'
-    if alt_deg < 80: return '65-80'
+    if alt_deg < 35:
+        return '<35'
+    if alt_deg < 50:
+        return '35-50'
+    if alt_deg < 65:
+        return '50-65'
+    if alt_deg < 80:
+        return '65-80'
     return '>=80'
 
 
@@ -106,8 +104,10 @@ def _rot_group(rot_deg):
     if not np.isfinite(rot_deg):
         return 'unknown'
     r = abs(rot_deg)
-    if r <= 3:   return '|rot|<=3'
-    if r <= 45:  return '3<|rot|<=45'
+    if r <= 3:
+        return '|rot|<=3'
+    if r <= 45:
+        return '3<|rot|<=45'
     return '|rot|>45'
 
 
@@ -158,7 +158,8 @@ def stack_per_visit_coeffs(fit_rows, kj_list):
 
 
 def _stack_per_visit_err_A(fit_rows, kj_list):
-    n_v = len(fit_rows); n_m = len(kj_list)
+    n_v = len(fit_rows)
+    n_m = len(kj_list)
     E = np.full((n_v, n_m), np.nan)
     for v, row in enumerate(fit_rows):
         for m, (k, j) in enumerate(kj_list):
@@ -230,7 +231,7 @@ def _pad_zk_to_z4_block(values_2d, iZs):
 
 
 def donut_fwhm_from_zk(zk_2d, iZs):
-    """Per-donut total FWHM-equivalent (arcsec) from a (n_donuts, n_zk) array."""
+    """Per-donut total FWHM-equivalent (arcsec) from (n_donuts, n_zk)."""
     if not _wep_ok:
         return np.full(len(zk_2d), np.nan)
     padded = _pad_zk_to_z4_block(zk_2d, iZs)
@@ -307,7 +308,8 @@ def compute_per_visit_sigmas(donut_df, residuals, fit_rows,
     dobs_out = np.zeros(n, dtype=int)
     snum_out = np.zeros(n, dtype=int)
     for v, r in enumerate(good):
-        d = int(r['day_obs']); s = int(r['seq_num'])
+        d = int(r['day_obs'])
+        s = int(r['seq_num'])
         dobs_out[v] = d
         snum_out[v] = s
         mask = (dobs_arr == d) & (snum_arr == s)
@@ -470,7 +472,8 @@ def plot_per_kj_vs_visit_page(W, kj_list, iZs_arr,
     if col is not None:
         ax.plot(np.arange(n_v), W[:, col], '.', ms=4, color=cmap_k(0.0))
     ax.set_title('(k=1, j=4) — Focus', fontsize=9)
-    ax.axhline(0, color='k', lw=0.4, alpha=0.5); ax.grid(alpha=0.3)
+    ax.axhline(0, color='k', lw=0.4, alpha=0.5)
+    ax.grid(alpha=0.3)
 
     # Panel 1: (k=2..6, j=4)
     ax = axes[1]
@@ -481,7 +484,8 @@ def plot_per_kj_vs_visit_page(W, kj_list, iZs_arr,
         c = cmap_k((k_val - k_min) / max(1, k_max - k_min))
         ax.plot(np.arange(n_v), W[:, col], '.', ms=3, color=c)
     ax.set_title('j=4, k=2..6', fontsize=9)
-    ax.axhline(0, color='k', lw=0.4, alpha=0.5); ax.grid(alpha=0.3)
+    ax.axhline(0, color='k', lw=0.4, alpha=0.5)
+    ax.grid(alpha=0.3)
 
     # Panels 2..21: each remaining j with k = 1..6
     for pidx, j_val in enumerate(js_rest, start=2):
@@ -495,7 +499,8 @@ def plot_per_kj_vs_visit_page(W, kj_list, iZs_arr,
             c = cmap_k(ki / max(1, k_max - k_min))
             ax.plot(np.arange(n_v), W[:, col], '.', ms=2.5, color=c)
         ax.set_title(f'j={int(j_val)}, k=1..6', fontsize=8)
-        ax.axhline(0, color='k', lw=0.4, alpha=0.5); ax.grid(alpha=0.3)
+        ax.axhline(0, color='k', lw=0.4, alpha=0.5)
+        ax.grid(alpha=0.3)
 
     for k in range(2 + len(js_rest), len(axes)):
         axes[k].set_visible(False)
@@ -503,8 +508,8 @@ def plot_per_kj_vs_visit_page(W, kj_list, iZs_arr,
     # Legend
     from matplotlib.lines import Line2D
     handles = [Line2D([], [], marker='o', linestyle='', ms=6,
-                       color=cmap_k(ki / max(1, k_max - k_min)),
-                       label=f'k={k_min + ki}')
+                      color=cmap_k(ki / max(1, k_max - k_min)),
+                      label=f'k={k_min + ki}')
                for ki in range(k_max - k_min + 1)]
     fig.legend(handles=handles, loc='lower center',
                bbox_to_anchor=(0.5, -0.02), ncol=k_max - k_min + 1,
@@ -566,7 +571,8 @@ def plot_example_visit_histograms(donut_df, residuals, fit_rows,
     if not good:
         return None
     r = good[min(example_idx, len(good) - 1)]
-    d = int(r['day_obs']); s = int(r['seq_num'])
+    d = int(r['day_obs'])
+    s = int(r['seq_num'])
     mask = (dobs_arr == d) & (snum_arr == s)
 
     ncols = 4
@@ -635,7 +641,8 @@ def plot_sigma_vs_visit_grid(sigmas, j_list, iZidx, visits_table,
             continue
         ax.plot(ordinal[i], y, **styles[i])
     ax.set_title('pooled = sqrt( Σ σ_j² )  (quadrature sum)', fontsize=9)
-    ax.set_ylim(bottom=0); ax.grid(alpha=0.3)
+    ax.set_ylim(bottom=0)
+    ax.grid(alpha=0.3)
     for ji, j in enumerate(j_list):
         ax = axes[ji + 1]
         for i in range(n_v):
@@ -644,7 +651,9 @@ def plot_sigma_vs_visit_grid(sigmas, j_list, iZidx, visits_table,
                 continue
             ax.plot(ordinal[i], y, **styles[i])
         ax.set_title(f'Z{j}', fontsize=8)
-        ax.set_ylim(bottom=0); ax.grid(alpha=0.3); ax.tick_params(labelsize=7)
+        ax.set_ylim(bottom=0)
+        ax.grid(alpha=0.3)
+        ax.tick_params(labelsize=7)
     for k in range(len(j_list) + 1, len(axes)):
         axes[k].set_visible(False)
     fig.suptitle(title_root, fontsize=12)
@@ -662,7 +671,8 @@ def plot_dof_vs_visit_pages(dof_array, dof_labels, dof_units,
     """
     n_v, n_dof = dof_array.shape
     ordinal = np.arange(n_v)
-    dobs = np.asarray(dobs); snum = np.asarray(snum)
+    dobs = np.asarray(dobs)
+    snum = np.asarray(snum)
 
     marker_lookup = build_visit_marker_lookup(visits_table)
     styles = []
@@ -686,7 +696,8 @@ def plot_dof_vs_visit_pages(dof_array, dof_labels, dof_units,
             dof_i = lo + slot
             ax = axes[slot]
             if dof_i >= hi:
-                ax.set_visible(False); continue
+                ax.set_visible(False)
+                continue
             yvals = dof_array[:, dof_i]
             for i in range(n_v):
                 y = yvals[i]
@@ -696,7 +707,8 @@ def plot_dof_vs_visit_pages(dof_array, dof_labels, dof_units,
             ax.set_title(f'{dof_labels[dof_i]}  ({dof_units[dof_i]})',
                          fontsize=8)
             ax.axhline(0, color='k', lw=0.4, alpha=0.5)
-            ax.grid(alpha=0.3); ax.tick_params(labelsize=7)
+            ax.grid(alpha=0.3)
+            ax.tick_params(labelsize=7)
         fig.suptitle(f'{title_root}  —  page {page + 1}/{n_pages}',
                      fontsize=12)
         figs.append(fig)
@@ -714,11 +726,17 @@ def plot_dof_median_summary(dof_per_iter, dof_labels, dof_units,
     iters = sorted(dof_per_iter.keys())
     medians = {it: np.nanmedian(dof_per_iter[it], axis=0) for it in iters}
 
-    # DOF index buckets
-    hex_trans_idx = [0, 1, 2,  5, 6, 7]               # M2 z/x/y, Cam z/x/y
-    hex_rot_idx   = [3, 4,     8, 9]                  # M2 rx/ry, Cam rx/ry
-    m1m3_idx      = list(range(10, 30))
-    m2_idx        = list(range(30, 50))
+    # DOF buckets keyed off the labels, not the global 50-DOF indices: a
+    # reduced DOF set passes only its own DOF, so `medians` and `dof_labels`
+    # are n_dof long and a global index runs off the end (22/12 is 10 rigid
+    # body + M1M3 bending 1-7 + M2 bending 1-5).
+    def _bucket(matches):
+        return [i for i, name in enumerate(dof_labels) if matches(name)]
+
+    hex_trans_idx = _bucket(lambda n: n.endswith(('_dz', '_dx', '_dy')))
+    hex_rot_idx   = _bucket(lambda n: n.endswith(('_rx', '_ry')))
+    m1m3_idx      = _bucket(lambda n: n.startswith('B1_'))
+    m2_idx        = _bucket(lambda n: n.startswith('B2_'))
 
     fig, axes = plt.subplots(4, 1, figsize=(15, 14),
                              layout='constrained',
@@ -734,6 +752,13 @@ def plot_dof_median_summary(dof_per_iter, dof_labels, dof_units,
         offsets = np.array([0.0])
 
     def _panel(ax, idx_list, title, y_unit):
+        if not idx_list:
+            # A DOF set that excludes a whole group, e.g. one with no M2
+            # bending modes, leaves its panel empty rather than failing.
+            ax.set_title(f'{title} (none in this DOF set)')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            return
         x = np.arange(len(idx_list))
         for xi in range(len(idx_list)):
             if xi % 2:
@@ -772,7 +797,8 @@ def plot_donut_fwhm_histogram(donut_df, residuals, fit_rows,
     if not good:
         return None
     r = good[min(example_idx, len(good) - 1)]
-    d = int(r['day_obs']); s = int(r['seq_num'])
+    d = int(r['day_obs'])
+    s = int(r['seq_num'])
     mask = (dobs_arr == d) & (snum_arr == s)
     res = residuals[mask]
     res = res[np.all(np.isfinite(res), axis=1)]
@@ -781,9 +807,6 @@ def plot_donut_fwhm_histogram(donut_df, residuals, fit_rows,
     if len(fwhms) < 5:
         return None
     med = float(np.median(fwhms))
-    sigma = float(np.std(fwhms))
-    mad = float(np.median(np.abs(fwhms - med)))
-    sigma_mad = 1.4826 * mad
 
     if hist_range is None:
         hi = float(np.nanpercentile(fwhms, 99.0)) * 1.1
@@ -859,7 +882,8 @@ def plot_fwhm_vs_visit(fwhm_per_donut, dobs_per_donut, snum_per_donut,
     ax.set_xlabel('Visit ordinal')
     ax.set_ylabel('median per-donut FWHM-equivalent  (arcsec)')
     ax.set_title(title_root, fontsize=12)
-    ax.set_ylim(bottom=0); ax.grid(alpha=0.3)
+    ax.set_ylim(bottom=0)
+    ax.grid(alpha=0.3)
     return fig
 
 
@@ -891,9 +915,9 @@ def plot_fwhm_focal_plane_map(thx_deg, thy_deg, fwhm_per_donut,
     ax.set_xlabel('thy [deg]')
     ax.set_ylabel('thx [deg]')
     ax.set_title(title)
-    cb = plt.colorbar(im, ax=ax,
-                      label=f'median FWHM  (arcsec, '
-                            f'{int(vmin_pct)}-{int(vmax_pct)}% range)')
+    plt.colorbar(im, ax=ax,
+                 label=f'median FWHM  (arcsec, '
+                       f'{int(vmin_pct)}-{int(vmax_pct)}% range)')
     return fig
 
 
@@ -911,9 +935,6 @@ def plot_fwhm_pooled_histogram(fwhm_per_donut, title_root,
     if len(f) < 5:
         return None
     med = float(np.median(f))
-    std = float(np.std(f))
-    mad = float(np.median(np.abs(f - med)))
-    sigma_mad = 1.4826 * mad
     if hist_range is None:
         hi = float(np.nanpercentile(f, 99.0)) * 1.1
         hist_range = (0.0, max(0.05, hi))
@@ -972,8 +993,10 @@ def plot_intrinsic_vs_azimuth(thx_deg, thy_deg, intrinsic_2d, iZidx, iZs,
                            if pidx == 0 else None))
         ax.axhline(0, color='k', lw=0.4, alpha=0.5)
         ax.set_title(f'Z{j}', fontsize=9)
-        ax.grid(alpha=0.3); ax.tick_params(labelsize=7)
-        ax.set_xlim(0, 360); ax.set_xticks([0, 90, 180, 270, 360])
+        ax.grid(alpha=0.3)
+        ax.tick_params(labelsize=7)
+        ax.set_xlim(0, 360)
+        ax.set_xticks([0, 90, 180, 270, 360])
     for k in range(len(js), len(axes)):
         axes[k].set_visible(False)
     for ax in axes[max(0, len(js) - ncols):len(js)]:
@@ -1001,7 +1024,8 @@ def plot_z4_optical_page(z4_meas_ocs, z4_height_ccs, z4_optical_ocs,
     fig, axes = plt.subplots(1, 3, figsize=(16.0, 5.2), layout='constrained')
     for ax, (title, g) in zip(axes, panels):
         if g is None or not np.any(np.isfinite(g)):
-            ax.set_visible(False); continue
+            ax.set_visible(False)
+            continue
         finite = g[np.isfinite(g)]
         vmin, vmax = np.nanpercentile(finite, [plo, phi])
         im = ax.imshow(g.T, origin='lower',
@@ -1097,12 +1121,14 @@ def _plot_modes_lines_all(A, n_keep_, title):
     for mi in range(nrows * ncols):
         ax = axes[mi]
         if mi >= n_keep_:
-            ax.axis('off'); continue
+            ax.axis('off')
+            continue
         ax.plot(np.arange(n_v), A[:, mi], '.-',
                 ms=2, lw=0.6, color=cmap(mi % 20))
         ax.axhline(0, color='k', lw=0.4, alpha=0.5)
         ax.set_title(f'mode {mi + 1}', fontsize=7)
-        ax.grid(alpha=0.3); ax.tick_params(labelsize=6)
+        ax.grid(alpha=0.3)
+        ax.tick_params(labelsize=6)
     fig.suptitle(title, fontsize=11)
     return fig
 
@@ -1167,10 +1193,10 @@ def plot_iter_progression_for_j(j, original_grid, iter_grids,
 
 
 def render_intrinsic_panel_pdf(grid_dict, xbins, ybins, iZs,
-                                output_pdf_path, frame_label,
-                                page_subtitle,
-                                panels_per_page=4, ncols=2,
-                                show_first=True):
+                               output_pdf_path, frame_label,
+                               page_subtitle,
+                               panels_per_page=4, ncols=2,
+                               show_first=True):
     """Stream a multi-page PDF of pupil-j panels for an iter-final grid.
 
     Each page has up to `panels_per_page` panels in a `ncols`-wide grid;

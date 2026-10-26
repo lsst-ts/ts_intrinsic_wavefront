@@ -33,9 +33,24 @@ def main():
     parser.add_argument('--coord-sys', default='OCS', choices=['OCS', 'CCS'],
                         help='Coordinate system (default: OCS)')
     parser.add_argument('--bad-fit-threshold', type=float, default=2.0,
-                        help='Flag fits with |coeff| > threshold μm (default: 2.0)')
+                        help='|coeff| above which a coefficient counts as large, μm '
+                             '(default: 2.0)')
+    parser.add_argument('--max-large-coeffs', type=int, default=5,
+                        help='Flag fits with more than this many large coefficients '
+                             '(default: 5)')
     parser.add_argument('--min-donuts', type=int, default=200,
                         help='Flag fits with fewer donuts (default: 200)')
+    parser.add_argument('--min-detectors', type=int, default=None,
+                        help='Opt-in override of the per-visit quality selection: '
+                             'keep visits with n_detectors_with_min_donuts >= this, '
+                             'relaxing ONLY the CCD-count cut (n_donuts/blur cuts '
+                             'unchanged) and bypassing the precomputed '
+                             'visit_quality_pass. Default: None (unchanged behavior).')
+    parser.add_argument('--no-quality-cut', action='store_true',
+                        help='Fit EVERY visit and apply no per-visit quality cut here; '
+                             'the metric columns still travel in the output so each '
+                             'consumer can cut as needed ("fit all, cut at use"). '
+                             'Default: off (unchanged behavior).')
 
     args = parser.parse_args()
 
@@ -45,8 +60,11 @@ def main():
         output_file=args.output,
         bad_fit_threshold=args.bad_fit_threshold,
         min_donuts=args.min_donuts,
+        max_large_coeffs=args.max_large_coeffs,
         visits_file=args.visits,
         intrinsic_sidecar=args.intrinsic_sidecar,
+        min_detectors=args.min_detectors,
+        no_quality_cut=args.no_quality_cut,
     )
 
 

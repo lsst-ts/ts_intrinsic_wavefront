@@ -4,19 +4,31 @@
 
 Faithful script port of build_measured_intrinsic.ipynb (Path A only): reads the
 Phase-1 combined ``output/<param_set>/{donuts,visits}.parquet``, filters visits
-to the rotator bin / bands, builds the OFC SVD (ofc_svd.build_ofc_svd), attaches
-per-donut CCD-height Z4, iterates the U-mode-constrained DZ removal
+to the rotator bin / bands, builds the OFC SVD (ofc_svd.build_ofc_svd),
+attaches per-donut CCD-height Z4, iterates the U-mode-constrained DZ removal
 (measured_intrinsic.build_measured_intrinsic_uconstrained), and writes:
 
-    <out>/intrinsic_grid.parquet   measured-intrinsic focal grid (+ z4_optical_OCS)
-    <out>/dz_fits.parquet          per-visit DZ fits + u/v-mode + DOF + FWHM cols
-    <out>/*.pdf                    validation, comparison, final-maps, CCS-binned
+    <out>/intrinsic_grid.parquet  measured-intrinsic grid (+ z4_optical_OCS)
+    <out>/dz_fits.parquet         per-visit DZ fits + u/v-mode + DOF + FWHM
+    <out>/*.pdf                   validation, comparison, final maps, CCS
 
 where <out> defaults to
     output/<param_set>/<mi_name>/build/rot_<rot_min>_<rot_max>/
 
 Config (n_keep, path, filter, rotator bins, ...) comes from mi_config.yaml,
 selected by --param-set + --mi-name; explicit flags override.  RSP-only.
+
+Set ``build.range_bounded_recovery: true`` to subtract a *range-bounded*
+optical state instead of the u-mode projection -- Range-Bounded Recovery (RBR),
+in ``lsst.ts.ofc``, optionally tuned by ``build.rbr_kappa``,
+``build.rbr_power`` and ``build.rbr_penalty_weight``.  Default off.
+
+For the MIW the measured wavefront drives some bending modes to tens of times
+their allowed range, and at that amplitude the barrier must not be confined to
+the retained-mode subspace: bounding those modes there drags the hexapods that
+correct Z11 along with them.  Set ``build.rbr_full_dof: true`` with ``n_keep``
+equal to ``n_dof`` for the "50/50 RBR" scheme, in which the barrier replaces
+mode truncation as the only regularizer.
 """
 import argparse
 from pathlib import Path
@@ -103,6 +115,12 @@ def main():
     ap.add_argument('--out-dir', default=None,
                     help='Explicit output dir (default: '
                          'output/<ps>/<mi>/build/rot_<lo>_<hi>)')
+    # The caller (the Snakefile) owns the output layout and may name
+    # directories differently from the param_set key, so the phase-1 table
+    # location can be given directly instead of being derived from it.
+    ap.add_argument('--tables-dir', default=None,
+                    help='Dir holding the phase-1 donuts/visits.parquet '
+                         '(default: output/<ps>)')
     args = ap.parse_args()
 
     cfg = mc.load_mi_config(args.param_set, args.mi_name,
@@ -120,9 +138,11 @@ def main():
     fp_radius_grid = float(b['fp_radius_grid'])
     min_donuts = int(b['min_donuts'])
     bad_fit_threshold = float(b['bad_fit_threshold'])
+    max_large_coeffs = int(b.get('max_large_coeffs', 5))
     allowed_bands = mc.as_band_list(cfg.get('filter'))
     programs = cfg.get('programs')
     alt_min, alt_max = cfg.get('alt_min_deg'), cfg.get('alt_max_deg')
+    day_obs_min, day_obs_max = cfg.get('day_obs_min'), cfg.get('day_obs_max')
     rot_min, rot_max = args.rot_min, args.rot_max
     max_visits = b.get('max_visits')
     ofc_norm_yaml = b.get('ofc_normalization_yaml')
@@ -130,17 +150,30 @@ def main():
     height_map_dir = b.get('batoid_rubin_height_map_dir')
     height_map_fits = b.get('height_map_fits')
     height_to_z4_factor = b.get('height_to_z4_factor')
+    # Range-Bounded Recovery: off by default, so an unchanged config rebuilds
+    # the unconstrained MIW bit for bit.
+    rbr_enabled = bool(b.get('range_bounded_recovery', False))
+    rbr_kappa = b.get('rbr_kappa')
+    rbr_power = b.get('rbr_power')
+    rbr_penalty_weight = b.get('rbr_penalty_weight')
+    # Solve over all DOF with the barrier as the only regularizer, rather than
+    # inside the retained-mode subspace.  Needed when the measured wavefront
+    # drives some DOF far outside range: the subspace solve couples the DOF, so
+    # bounding those drags along the hexapods that correct Z11.  See
+    # `invert_range_penalty` in ts_ofc.
+    rbr_full_dof = bool(b.get('rbr_full_dof', False))
     wfs_edge_cut_deg = float(b.get('wfs_edge_cut_deg', 1.75))
     n_radial_bins_azimuth = int(b.get('n_radial_bins_azimuth', 4))
     azimuth_bin_deg = float(b.get('azimuth_bin_deg', 15.0))
 
-    base = Path(args.output_root) / args.param_set
+    ps_base = Path(args.output_root) / args.param_set
+    base = Path(args.tables_dir) if args.tables_dir else ps_base
     if args.out_dir:
         out_dir = Path(args.out_dir)
     else:
         rtag = (f'rot_{rot_min:g}_{rot_max:g}'
                 if rot_min is not None and rot_max is not None else 'rot_all')
-        out_dir = base / args.mi_name / 'build' / rtag
+        out_dir = ps_base / args.mi_name / 'build' / rtag
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f'[build_intrinsic] {args.param_set} / {args.mi_name}  '
           f'rot=[{rot_min},{rot_max}]  -> {out_dir}')
@@ -150,7 +183,8 @@ def main():
     visits_full = QTable.read(str(base / 'visits.parquet'))
     visits_kept = apply_visit_filters(
         visits_full, alt_min_deg=alt_min, alt_max_deg=alt_max,
-        rotator_min_deg=rot_min, rotator_max_deg=rot_max)
+        rotator_min_deg=rot_min, rotator_max_deg=rot_max,
+        day_obs_min=day_obs_min, day_obs_max=day_obs_max)
     visits_kept = filter_visits_by_band(visits_kept, allowed_bands)
     visits_kept = filter_visits_by_program(visits_kept, programs)
     if max_visits and len(visits_kept) > max_visits:
@@ -158,7 +192,8 @@ def main():
             np.linspace(0, len(visits_kept) - 1, max_visits)).astype(int))
         visits_kept = visits_kept[idx]
     print(f'  visits kept: {len(visits_kept)}/{len(visits_full)} '
-          f'(bands={allowed_bands}, programs={programs}, alt=[{alt_min},{alt_max}])')
+          f'(bands={allowed_bands}, programs={programs}, alt=[{alt_min},{alt_max}], '
+          f'day_obs=[{day_obs_min},{day_obs_max}])')
     if len(visits_kept) == 0:
         raise RuntimeError('No visits pass the filters for this bin.')
 
@@ -186,6 +221,33 @@ def main():
     label = f'nkeep_{n_keep_eff}'
     print(f'  SVD: U_eff={U_eff.shape}, n_dof={svd.n_dof}, n_keep_eff={n_keep_eff}')
 
+    # ---- Range-Bounded Recovery (opt-in) ----
+    rbr_estimator = None
+    if rbr_enabled:
+        rbr_estimator = svd.estimator
+        # dof_range_bounded reads kappa/power from the controller config, as
+        # ts_ofc does for truncation_index and motion_penalty.
+        if rbr_kappa is not None:
+            rbr_estimator.ofc_data.controller['rbr_kappa'] = float(rbr_kappa)
+        if rbr_power is not None:
+            rbr_estimator.ofc_data.controller['rbr_power'] = int(rbr_power)
+        if rbr_penalty_weight is not None:
+            rbr_estimator.ofc_data.controller['rbr_penalty_weight'] = \
+                float(rbr_penalty_weight)
+        from lsst.ts.ofc import (RBR_DEFAULT_KAPPA, RBR_DEFAULT_POWER,
+                                 RBR_DEFAULT_WEIGHT)
+        ctrl = rbr_estimator.ofc_data.controller
+        print(f'  RBR on: kappa={ctrl.get("rbr_kappa", RBR_DEFAULT_KAPPA):g} '
+              f'(knee at |d_j| = kappa * r_j), '
+              f'power={ctrl.get("rbr_power", RBR_DEFAULT_POWER)} '
+              f'(penalty grows as |d_j|**(2*power)), '
+              f'lambda='
+              f'{ctrl.get("rbr_penalty_weight", RBR_DEFAULT_WEIGHT):g} '
+              f'um^2 of wavefront (barrier weight)')
+        scheme = ('all DOF, barrier is the only regularizer' if rbr_full_dof
+                  else f'restricted to the {n_keep_eff} retained modes')
+        print(f'  RBR solve: {scheme}')
+
     # ---- per-donut CCD-height Z4 ----
     Z4hgt = None
     if 4 in iZs:
@@ -211,12 +273,15 @@ def main():
         donut_df, visits_kept, coord_sys, iZs, kj_grid=kj_grid, U_eff=U_eff,
         n_iter=n_iter, n_bins=n_bins, fp_radius_basis=fp_radius_basis,
         fp_radius_grid=fp_radius_grid, min_donuts=min_donuts,
-        bad_fit_threshold=bad_fit_threshold)
+        bad_fit_threshold=bad_fit_threshold, max_large_coeffs=max_large_coeffs,
+        rbr_estimator=rbr_estimator,
+        rbr_full_dof=rbr_full_dof)
     final = result['iter_results'][-1]
     xbins, ybins = result['xbins'], result['ybins']
     print(f'  Path A: {n_iter} iters, {len(final["fit_rows"])} visits')
 
-    # ---- Z4 optical / height grids (per-donut subtraction before binning) ----
+    # ---- Z4 optical / height grids (per-donut subtraction before binning)
+    # ----
     z4_optical_grid = z4_height_ccs_grid = None
     if Z4hgt is not None and 4 in iZidx:
         gm = final.get('good_donut_mask', np.ones(len(donut_df), dtype=bool))
@@ -250,7 +315,15 @@ def main():
     A_last = np.where(np.isfinite(ibp.stack_per_visit_coeffs(final['fit_rows_raw'], kj_grid)),
                       ibp.stack_per_visit_coeffs(final['fit_rows_raw'], kj_grid), 0.0) @ U_eff
     V_last = A_last / np.asarray(Sigma[keep_idx])[None, :]
-    dof_last = svd.dof(A_last)
+    W_raw_for_dof = ibp.stack_per_visit_coeffs(final['fit_rows_raw'], kj_grid)
+    if rbr_estimator is not None:
+        # The state the build actually subtracted, so the reported DOF match
+        # the MIW rather than the unconstrained recovery.
+        dof_last = rbr_estimator.dof_range_bounded(
+            np.where(np.isfinite(W_raw_for_dof), W_raw_for_dof, 0.0),
+            full_dof=rbr_full_dof)
+    else:
+        dof_last = svd.dof(A_last)
     W_raw = ibp.stack_per_visit_coeffs(final['fit_rows_raw'], kj_grid)
     W_fit = ibp.stack_per_visit_coeffs(final['fit_rows'], kj_grid)
     ibp.augment_fit_rows_with_modes(
@@ -280,7 +353,15 @@ def main():
     with open(out_dir / 'mi_config.yaml', 'w') as fh:
         yaml.safe_dump({'param_set': args.param_set, 'mi_name': args.mi_name,
                         'rot_min': rot_min, 'rot_max': rot_max,
-                        'n_keep_eff': int(n_keep_eff), **cfg}, fh, sort_keys=False)
+                        'n_keep_eff': int(n_keep_eff),
+                        'range_bounded_recovery': bool(rbr_enabled),
+                        'rbr_full_dof': bool(rbr_full_dof),
+                        'recovery_scheme': (
+                            f'{svd.n_dof}/{n_keep_eff}'
+                            + (' RBR' if rbr_enabled else '')
+                            + (' (barrier is the only regularizer)'
+                               if rbr_enabled and rbr_full_dof else '')),
+                        **cfg}, fh, sort_keys=False)
     print('[build_intrinsic] done.')
 
 
@@ -303,7 +384,8 @@ def _write_validation_pdf(path, result, donut_df, visits_kept, coord_sys, iZs,
     with PdfPages(str(path)) as pdf:
         def emit(fig):
             if fig is not None:
-                pdf.savefig(fig, bbox_inches='tight'); plt.close(fig)
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
 
         # A. SVD diagnostics + reachability (once; same for all rotator bins)
         emit(_svd_diagnostics_fig(U_eff, V, Sigma, frac_2d, n_k, n_j, iZs_arr,
@@ -362,7 +444,8 @@ def _write_validation_pdf(path, result, donut_df, visits_kept, coord_sys, iZs,
         if getattr(ibp, '_wep_ok', False):
             bad = {(int(r['day_obs']), int(r['seq_num'])) for r in nres['fit_rows']
                    if r.get('bad_fit')}
-            d_all = np.asarray(donut_df['day_obs']); s_all = np.asarray(donut_df['seq_num'])
+            d_all = np.asarray(donut_df['day_obs'])
+            s_all = np.asarray(donut_df['seq_num'])
             good = np.array([(int(d), int(s)) not in bad for d, s in zip(d_all, s_all)])
             fwhm = ibp.donut_fwhm_from_zk(residuals[good], list(iZs))
             txg = np.rad2deg(np.asarray(donut_df.loc[good, f'thx_{coord_sys}'], dtype=float))
@@ -423,25 +506,33 @@ def _svd_diagnostics_fig(U_eff, V, Sigma, frac_2d, n_k, n_j, iZs_arr, k_min,
     im = ax[0, 0].imshow(V[:, :n_show], aspect='auto', cmap='seismic',
                          vmin=-1, vmax=1)
     ax[0, 0].set_title('V (normalized DOF × v-mode)')
-    ax[0, 0].set_xlabel('v-mode'); ax[0, 0].set_ylabel('DOF')
+    ax[0, 0].set_xlabel('v-mode')
+    ax[0, 0].set_ylabel('DOF')
     yt = range(0, len(dof_labels), max(1, len(dof_labels) // 12))
-    ax[0, 0].set_yticks(list(yt)); ax[0, 0].set_yticklabels([dof_labels[i] for i in yt], fontsize=6)
+    ax[0, 0].set_yticks(list(yt))
+    ax[0, 0].set_yticklabels([dof_labels[i] for i in yt], fontsize=6)
     fig.colorbar(im, ax=ax[0, 0], shrink=0.8)
     ax[0, 1].semilogy(np.arange(1, len(Sigma) + 1), Sigma, 'o-', ms=4)
     ax[0, 1].axvline(len(keep_idx) + 0.5, color='green', alpha=0.6,
                      label=f'n_keep={len(keep_idx)}')
-    ax[0, 1].set_title('singular values σ'); ax[0, 1].set_xlabel('mode')
-    ax[0, 1].legend(fontsize=8); ax[0, 1].grid(alpha=0.3)
+    ax[0, 1].set_title('singular values σ')
+    ax[0, 1].set_xlabel('mode')
+    ax[0, 1].legend(fontsize=8)
+    ax[0, 1].grid(alpha=0.3)
     vmax = float(np.nanpercentile(np.abs(U_eff), 98)) or 1.0
     im = ax[1, 0].imshow(U_eff, aspect='auto', cmap='RdBu_r', vmin=-vmax, vmax=vmax)
-    ax[1, 0].set_title('U_eff (DZ row × u-mode)'); ax[1, 0].set_xlabel('u-mode')
-    ax[1, 0].set_ylabel('(k,j) row'); fig.colorbar(im, ax=ax[1, 0], shrink=0.8)
+    ax[1, 0].set_title('U_eff (DZ row × u-mode)')
+    ax[1, 0].set_xlabel('u-mode')
+    ax[1, 0].set_ylabel('(k,j) row')
+    fig.colorbar(im, ax=ax[1, 0], shrink=0.8)
     im = ax[1, 1].imshow(100.0 * frac_2d, aspect='auto', cmap='magma_r',
                          vmin=0, vmax=100)
     ax[1, 1].set_title('U² reachability f(k,j) [%]')
-    ax[1, 1].set_xticks(range(n_j)); ax[1, 1].set_xticklabels([f'Z{j}' for j in iZs_arr],
-                                                              rotation=90, fontsize=7)
-    ax[1, 1].set_yticks(range(n_k)); ax[1, 1].set_yticklabels([f'k={k_min+ki}' for ki in range(n_k)])
+    ax[1, 1].set_xticks(range(n_j))
+    ax[1, 1].set_xticklabels([f'Z{j}' for j in iZs_arr],
+                             rotation=90, fontsize=7)
+    ax[1, 1].set_yticks(range(n_k))
+    ax[1, 1].set_yticklabels([f'k={k_min+ki}' for ki in range(n_k)])
     fig.colorbar(im, ax=ax[1, 1], shrink=0.8)
     fig.suptitle('OFC SVD diagnostics', fontsize=13)
     return fig
@@ -458,9 +549,12 @@ def _reachability_fig(frac_2d, n_k, n_j, iZs_arr, k_min, n_keep_eff, threshold):
             v = 100.0 * frac_2d[ki, ji]
             ax.text(ji, ki, f'{v:4.0f}', ha='center', va='center', fontsize=6,
                     color='white' if v > 55 else 'black')
-    ax.set_xticks(range(n_j)); ax.set_xticklabels([f'Z{j}' for j in iZs_arr], fontsize=8)
-    ax.set_yticks(range(n_k)); ax.set_yticklabels([f'k={k_min+ki}' for ki in range(n_k)])
-    ax.set_xlabel('pupil Noll j'); ax.set_ylabel('focal Noll k')
+    ax.set_xticks(range(n_j))
+    ax.set_xticklabels([f'Z{j}' for j in iZs_arr], fontsize=8)
+    ax.set_yticks(range(n_k))
+    ax.set_yticklabels([f'k={k_min+ki}' for ki in range(n_k)])
+    ax.set_xlabel('pupil Noll j')
+    ax.set_ylabel('focal Noll k')
     ax.set_title(f'Reachability f(k,j)  (n_keep={n_keep_eff}, thr={threshold:g})')
     fig.colorbar(im, ax=ax, label='%')
     return fig
@@ -478,11 +572,13 @@ def _umode_stability_fig(A_prev, A_last, n_keep_eff, n_iter):
     for m in range(nrows * ncols):
         ax = axes[m]
         if m >= n_keep_eff:
-            ax.axis('off'); continue
+            ax.axis('off')
+            continue
         ax.plot(range(nv), A_prev[:, m], '.', ms=2, color='steelblue', alpha=0.6)
         ax.plot(range(nv), A_last[:, m], '.', ms=2.5, color='crimson', alpha=0.9)
         ax.axhline(0, color='k', lw=0.4, alpha=0.5)
-        ax.set_title(f'mode {m + 1}', fontsize=7); ax.grid(alpha=0.3)
+        ax.set_title(f'mode {m + 1}', fontsize=7)
+        ax.grid(alpha=0.3)
         ax.tick_params(labelsize=6)
     fig.suptitle(f'Path A U-mode amplitude stability — iter {n_iter-1} (blue) '
                  f'vs {n_iter} (red)', fontsize=11)
@@ -501,7 +597,8 @@ def _write_comparison_pdf(path, result, iZs, coord_sys, xbins, ybins):
                 result['tabulated_median'].get(j), xbins, ybins, coord_sys,
                 path_tag=' — Path A')
             if fig is not None:
-                pdf.savefig(fig, bbox_inches='tight'); plt.close(fig)
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
     print(f'  wrote {path.name}')
 
 
@@ -527,16 +624,19 @@ def _write_final_maps_pdf(path, grid, iZs, xbins, ybins, z4_optical_grid,
             axes = np.atleast_1d(axes).ravel()
             for ax, (title, g) in zip(axes, chunk):
                 if g is None:
-                    ax.set_visible(False); continue
+                    ax.set_visible(False)
+                    continue
                 finite = g[np.isfinite(g)]
                 vlim = (np.nanpercentile(np.abs(finite), 95) if finite.size else 1.0) or 1.0
                 pcm = ax.pcolormesh(xbins, ybins, g.T, cmap='RdBu_r',
                                     vmin=-vlim, vmax=vlim, shading='flat')
-                ax.set_aspect('equal'); ax.set_title(title, fontsize=9)
+                ax.set_aspect('equal')
+                ax.set_title(title, fontsize=9)
                 plt.colorbar(pcm, ax=ax, shrink=0.75)
             for ax in axes[len(chunk):]:
                 ax.set_visible(False)
-            pdf.savefig(fig, bbox_inches='tight'); plt.close(fig)
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
     print(f'  wrote {path.name}')
 
 

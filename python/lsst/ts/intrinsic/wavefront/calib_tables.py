@@ -43,10 +43,10 @@ The two systems are split by their physical nature, which also matches how
   detector only needs its own value, and the height makes it genuinely
   **per-detector**.  One CCS table is written per detector.
 
-This module builds the tables from in-memory arrays (astropy + numpy only).  The
-per-CCD height piston itself is computed by the caller (it needs ``cameraGeom``
-and the metrology map; see ``bin.src/run_make_calib_tables.py``) and passed in
-here as a scalar µm offset added to the CCS ``Z4`` column.
+This module builds the tables from in-memory arrays (astropy + numpy only).
+The per-CCD height piston itself is computed by the caller (it needs
+``cameraGeom`` and the metrology map; see ``bin.src/run_make_calib_tables.py``)
+and passed in here as a scalar µm offset added to the CCS ``Z4`` column.
 """
 
 __all__ = [
@@ -64,9 +64,10 @@ import numpy as np
 from astropy import units as u
 from astropy.table import Table
 
-# LSSTCam on-sky band -> physical_filter, from obs_lsst LSSTCAM_FILTER_DEFINITIONS
-# (python/lsst/obs/lsst/filters.py).  Used at ingest time to replicate the
-# filter-independent tables across the physical_filter dataId.
+# LSSTCam on-sky band -> physical_filter, from obs_lsst
+# LSSTCAM_FILTER_DEFINITIONS (python/lsst/obs/lsst/filters.py).  Used at ingest
+# time to replicate the filter-independent tables across the physical_filter
+# dataId.
 LSSTCAM_PHYSICAL_FILTERS = {
     "u": "u_24",
     "g": "g_6",
@@ -190,11 +191,11 @@ def ccs_source_table(maps, detector=None, piston_z4_um=0.0, noll_list=None,
     instrument : `str`, optional
         Recorded in ``meta``.
     zero_camera_field : `bool`, optional
-        If ``True``, zero the smooth camera field ``C`` and keep only the ``Z4``
-        height piston (all other Noll become 0).  Used for the field-edge CCDs
-        that sit past the data: there is no measured camera field for them, so
-        it is more honest to store the height-only term than a whole-field
-        placeholder.  Default ``False``.
+        If ``True``, zero the smooth camera field ``C`` and keep only the
+        ``Z4`` height piston (all other Noll become 0).  Used for the
+        field-edge CCDs that sit past the data: there is no measured camera
+        field for them, so it is more honest to store the height-only term than
+        a whole-field placeholder.  Default ``False``.
 
     Returns
     -------
@@ -324,8 +325,8 @@ def ccs_source_table_on_grid(maps, x_deg, y_deg, height_z4_um=None,
     if detector is not None:
         extra["detector"] = int(detector)
     if height_z4_um is not None:
-        # height is applied PER POINT here (not a scalar piston); record only the
-        # mean as a diagnostic summary of the CCD's height field.
+        # height is applied PER POINT here (not a scalar piston); record only
+        # the mean as a diagnostic summary of the CCD's height field.
         extra["mean_z4_height_um"] = float(np.nanmean(np.asarray(height_z4_um, float)))
     return _build_table(x, y, columns, js, "CCS", dict(maps.meta),
                         extra_meta=extra)

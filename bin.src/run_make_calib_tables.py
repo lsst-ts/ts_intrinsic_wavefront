@@ -33,12 +33,12 @@ in µm) and writes, under ``<out-root>/<version>/``:
   intrinsic (Rubin v3.14) on the same grid; their CCS camera field is left
   empty (zero), keeping OCS and CCS on the identical Noll set ip_isr requires.
 * ``intrinsic_aberrations_CCS_det<NNN>.parquet`` — one **per detector**: the
-  smooth camera field ``C`` sampled on a grid of points across the CCD footprint,
-  with the CCD focal-plane height (``ccd_height``; 15 µm/mm) added to ``Z4`` at
-  **each point** (so the intra-CCD height structure is preserved).  The CCS query
-  point is never rotated, so each detector only needs its own footprint.  The
-  ~16 field-edge CCDs whose footprints fall past the data are stored height-only
-  (``Z4`` = mean height, camera field zeroed).
+  smooth camera field ``C`` sampled on a grid of points across the CCD
+  footprint, with the CCD focal-plane height (``ccd_height``; 15 µm/mm) added
+  to ``Z4`` at **each point** (so the intra-CCD height structure is preserved).
+  The CCS query point is never rotated, so each detector only needs its own
+  footprint.  The ~16 field-edge CCDs whose footprints fall past the data are
+  stored height-only (``Z4`` = mean height, camera field zeroed).
 * ``provenance.yaml`` — map source, git state, detectors, height source, the
   list of height-only fallback detectors, and the maps' own ``.meta``.
 
@@ -47,10 +47,10 @@ Filters are handled at **ingest** time (the tables are filter-independent; the
 filter-specific is written here.  The Butler dataset type stays per
 ``(detector, physical_filter)`` — no ts_wep change.
 
-Locate the maps with ``--maps PATH`` or, mirroring ``calibration/stage_miw.py``,
-via ``--param-set``/``--mi-name`` (``--output-root`` defaults to
-``pipelines/output``).  Needs the LSST stack (cameraGeom + obs_lsst) and the
-batoid_rubin / metrology height map.
+Locate the maps with ``--maps PATH`` or, mirroring
+``calibration/stage_miw.py``, via ``--param-set``/``--mi-name``
+(``--output-root`` defaults to ``pipelines/output``).  Needs the LSST stack
+(cameraGeom + obs_lsst) and the batoid_rubin / metrology height map.
 
 Example
 -------
@@ -147,10 +147,10 @@ def _footprint_heights(footprints, camera, source, height_map_dir,
                        metrology_fits, factor):
     """Per-point Z4 height (µm) for every footprint sample of every detector.
 
-    Runs the pipeline's ``compute_ccd_heights`` **once** over all points (so the
-    batoid height maps load a single time), then splits the result back per
-    detector.  Returns ``{detector_id: ndarray of Z4_height (µm)}`` aligned with
-    each detector's footprint order.
+    Runs the pipeline's ``compute_ccd_heights`` **once** over all points (so
+    the batoid height maps load a single time), then splits the result back per
+    detector.  Returns ``{detector_id: ndarray of Z4_height (µm)}`` aligned
+    with each detector's footprint order.
     """
     import numpy as np
     import pandas as pd
@@ -285,11 +285,11 @@ def main():
     print(f"[make_calib_tables] maps: {maps_path}  ({len(maps)} field points, "
           f"Noll {js})")
 
-    # ---- detectors + per-detector footprint heights ----
-    # Sample the CCD height at an n_side x n_side grid across each detector
-    # footprint, so the intra-CCD height structure is preserved (added to Z4 per
-    # point below).  ``mean_height`` is only used for the height-only field-edge
-    # CCDs, whose footprints fall past the data.
+    # ---- detectors + per-detector footprint heights ---- Sample the CCD
+    # height at an n_side x n_side grid across each detector footprint, so the
+    # intra-CCD height structure is preserved (added to Z4 per point below).
+    # ``mean_height`` is only used for the height-only field-edge CCDs, whose
+    # footprints fall past the data.
     camera = _get_camera(args.instrument)
     all_ids = [int(det.getId()) for det in camera]
     detectors = list(args.detectors) if args.detectors is not None else all_ids
@@ -326,9 +326,10 @@ def main():
             height_z4_um=fp_heights[det], detector=det,
             noll_list=args.noll_list, instrument=args.instrument)
         if len(ccs) < args.ccs_footprint_min_points:
-            # field-edge CCD past the data: too few in-support footprint points to
-            # interpolate a camera field, and no measured field exists there.
-            # Store it height-only (Z4 = mean height, camera field zeroed).
+            # field-edge CCD past the data: too few in-support footprint points
+            # to interpolate a camera field, and no measured field exists
+            # there. Store it height-only (Z4 = mean height, camera field
+            # zeroed).
             ccs = ct.ccs_source_table(maps, detector=det,
                                       piston_z4_um=mean_height[det],
                                       noll_list=args.noll_list,
