@@ -12,6 +12,11 @@ with one row per donut (same order as donuts.parquet), a list column
 (day_obs, seq_num, detector, centroid_x_intra, centroid_y_intra) so the refit
 (step 4) can join robustly.
 
+An UNPAIRED corner-sensor table (one row per donut on its own half-sensor, no
+pixel centroids) is handled too: the CCD height is evaluated at the pixel the
+donut's CCS field angle maps to on its detector, and the key columns are
+thx_OCS, thy_OCS (and wfs_offset when present) instead of the centroids.
+
 Reconstruction (per donut, at its visit's rotator angle theta) uses
 intrinsic_split.reconstruct_at — the exact inverse of the decomposition:
 ``A(theta) = O_pol + exp(i*n_spin*s*theta)*roll(C_pol, shift)`` — so the
@@ -110,14 +115,22 @@ def main():
     print(f'[sidecar] {args.param_set}/{args.mi_name}: {nZk} Zernikes {jvals}')
 
     # ---- donut light columns (file order) ----
-    cols = ['day_obs', 'seq_num', 'detector',
-            f'thx_{coord}', f'thy_{coord}',
-            'centroid_x_intra', 'centroid_y_intra',
-            'centroid_x_extra', 'centroid_y_extra']
+    centroid_cols = ['centroid_x_intra', 'centroid_y_intra',
+                     'centroid_x_extra', 'centroid_y_extra']
     donuts_path = Path(args.donuts) if args.donuts else base / 'donuts.parquet'
+    have = set(pq.read_schema(str(donuts_path)).names)
+    paired = set(centroid_cols) <= have
+    cols = ['day_obs', 'seq_num', 'detector', f'thx_{coord}', f'thy_{coord}']
+    if paired:
+        cols += centroid_cols
+    else:
+        cols += [c for c in ('thx_OCS', 'thy_OCS', 'thx_CCS', 'thy_CCS', 'wfs_offset')
+                 if c in have and c not in cols]
+        print('  unpaired table (no pixel centroids): height at the field-angle '
+              'pixel on each donut\'s own sensor; keyed on thx_OCS, thy_OCS')
     # prefer a per-donut rotator_angle column (present in wfs/donuts.parquet,
     # whose seq_num is the in-focus seq and won't match the FAM-keyed visits)
-    if 'rotator_angle' in pq.read_schema(str(donuts_path)).names:
+    if 'rotator_angle' in have:
         cols.append('rotator_angle')
     dd = pq.read_table(str(donuts_path), columns=cols).to_pandas()
     rot_col = dd['rotator_angle'].to_numpy(float) if 'rotator_angle' in dd.columns else None
@@ -138,11 +151,17 @@ def main():
             from lsst.ts.intrinsic.wavefront.ccd_height import (
                 compute_ccd_heights, HEIGHT_TO_Z4_UM_PER_MM)
             cam = LsstCam.getCamera()
+            hdf = dd
+            if not paired:
+                from lsst.ts.intrinsic.wavefront.ccd_height import field_to_pixel
+                xp, yp = field_to_pixel(dd, cam)
+                hdf = dd.assign(centroid_x_intra=xp, centroid_y_intra=yp,
+                                centroid_x_extra=xp, centroid_y_extra=yp)
             fac = b.get('height_to_z4_factor') or HEIGHT_TO_Z4_UM_PER_MM
             hkw = dict(source=b.get('height_source', 'batoid_rubin'),
                        height_map_dir=(args.height_map_dir or b.get('batoid_rubin_height_map_dir')),
                        metrology_fits=b.get('height_map_fits'), factor=fac)
-            if args.wfs_corner_height:
+            if args.wfs_corner_height and paired:
                 # corner rafts: extra donut on <raft>_SW0, intra on <raft>_SW1;
                 # evaluate each half on its own sensor and average the heights.
                 dfe = dd.copy()
@@ -154,7 +173,7 @@ def main():
                     z4_height = fac * np.nanmean(np.vstack([hi, he]), axis=0)
                 print(f'  Z4_height (WFS corner, SW1-intra/SW0-extra): mean={np.nanmean(z4_height):+.4f} μm')
             else:
-                z4_height = np.asarray(compute_ccd_heights(dd, cam, **hkw)['Z4_height'], float)
+                z4_height = np.asarray(compute_ccd_heights(hdf, cam, **hkw)['Z4_height'], float)
                 print(f'  Z4_height: mean={np.nanmean(z4_height):+.4f} μm')
         except Exception as e:
             print(f'  Z4 height skipped: {type(e).__name__}: {e}')
@@ -207,18 +226,17 @@ def main():
           f'({n_missing_rot} donuts missing rotator)')
 
     # ---- write row-aligned sidecar ----
-    out_tbl = pa.table({
-        'day_obs': pa.array(dobs), 'seq_num': pa.array(snum),
-        'detector': pa.array(dd['detector'].astype(str)),
-        'centroid_x_intra': pa.array(np.asarray(dd['centroid_x_intra'], dtype=float)),
-        'centroid_y_intra': pa.array(np.asarray(dd['centroid_y_intra'], dtype=float)),
-        # Extra-focal centroids included so the per-donut join key (in
-        # dz_fitting.load_intrinsic_lookup) is unique even if two donuts in the
-        # same visit+detector share the same rounded intra centroid.
-        'centroid_x_extra': pa.array(np.asarray(dd['centroid_x_extra'], dtype=float)),
-        'centroid_y_extra': pa.array(np.asarray(dd['centroid_y_extra'], dtype=float)),
-        'zk_intrinsic_MI': pa.array(list(zk_int)),
-    })
+    out_cols = {'day_obs': pa.array(dobs), 'seq_num': pa.array(snum),
+                'detector': pa.array(dd['detector'].astype(str))}
+    # Extra-focal centroids included so the per-donut join key (in
+    # dz_fitting.load_intrinsic_lookup) is unique even if two donuts in the
+    # same visit+detector share the same rounded intra centroid.
+    key_cols = centroid_cols if paired else [
+        c for c in ('thx_OCS', 'thy_OCS', 'wfs_offset') if c in dd.columns]
+    for c in key_cols:
+        out_cols[c] = pa.array(np.asarray(dd[c]))
+    out_cols['zk_intrinsic_MI'] = pa.array(list(zk_int))
+    out_tbl = pa.table(out_cols)
     meta = {b'nollIndices': np.array(jvals, dtype=int).tobytes(),
             b'mi_name': args.mi_name.encode(), b'coord_sys': coord.encode(),
             b'n_rows': str(N).encode()}

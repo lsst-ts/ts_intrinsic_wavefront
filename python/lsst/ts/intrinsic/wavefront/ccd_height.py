@@ -94,6 +94,50 @@ def compute_fp_coords(donut_df, camera,
     return fpx, fpy
 
 
+def field_to_pixel(donut_df, camera, thx_col='thx_CCS', thy_col='thy_CCS',
+                   det_col='detector'):
+    """Per-donut pixel position on its own detector, from its CCS field angle.
+
+    For unpaired corner-sensor tables, which carry a field angle but no pixel
+    centroids. The result can stand in for the centroid columns of
+    `compute_ccd_heights`.
+
+    Parameters
+    ----------
+    donut_df : pandas.DataFrame or astropy.QTable
+        Must contain `thx_col`, `thy_col` (CCS field angle, rad) and
+        `det_col`.
+    camera : lsst.afw.cameraGeom.Camera
+    thx_col, thy_col, det_col : str
+
+    Returns
+    -------
+    x_pix, y_pix : ndarray
+        Pixel position on the named detector; NaN off any known detector.
+    """
+    import lsst.geom as geom
+    from lsst.afw.cameraGeom import FIELD_ANGLE, FOCAL_PLANE, PIXELS
+
+    det_names = np.asarray(donut_df[det_col]).astype(str)
+    thx = np.asarray(donut_df[thx_col], dtype=float)
+    thy = np.asarray(donut_df[thy_col], dtype=float)
+    to_fp = camera.getTransform(FIELD_ANGLE, FOCAL_PLANE)
+    x_pix = np.full_like(thx, np.nan)
+    y_pix = np.full_like(thy, np.nan)
+    for det in camera:
+        mask = det_names == det.getName()
+        if not np.any(mask):
+            continue
+        to_pix = det.getTransform(FOCAL_PLANE, PIXELS)
+        # cameraGeom's FIELD_ANGLE is (thy, thx) in this package's CCS
+        # convention; (thx, thy) lands the point about 27 mm away.
+        pts = to_pix.applyForward(to_fp.applyForward(
+            [geom.Point2D(b, a) for a, b in zip(thx[mask], thy[mask])]))
+        x_pix[mask] = [q.getX() for q in pts]
+        y_pix[mask] = [q.getY() for q in pts]
+    return x_pix, y_pix
+
+
 # ----------------------------------------------------------------------
 # Height-map I/O + KNN interpolator
 # ----------------------------------------------------------------------
