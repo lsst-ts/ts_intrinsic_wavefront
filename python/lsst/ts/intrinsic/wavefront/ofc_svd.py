@@ -58,8 +58,8 @@ LABELS_50DOF = [
     'B2_16', 'B2_17', 'B2_18', 'B2_19', 'B2_20',
 ]
 DOF_UNITS_50 = (
-    ['μm', 'μm', 'μm', 'arcsec', 'arcsec']       # M2 hex
-    + ['μm', 'μm', 'μm', 'arcsec', 'arcsec']     # Cam hex
+    ['μm', 'μm', 'μm', 'deg', 'deg']             # M2 hex
+    + ['μm', 'μm', 'μm', 'deg', 'deg']           # Cam hex
     + ['μm'] * 20                                # M1M3 bending
     + ['μm'] * 20                                # M2 bending
 )
