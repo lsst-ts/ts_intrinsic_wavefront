@@ -197,7 +197,8 @@ class OFCSvd:
 
 def build_ofc_svd(iZs, k_min, k_max, n_keep, n_dof=None,
                   ofc_normalization_yaml=None,
-                  instrument='lsst', norm_yaml_name=DEFAULT_NORM_YAML):
+                  instrument='lsst', norm_yaml_name=DEFAULT_NORM_YAML,
+                  ofc_config_dir=None):
     """Build the OFC sensitivity-matrix SVD for a focal-k x pupil-j slice.
 
     ``n_dof`` selects the DOF columns: None -> all 50; an int ``n`` -> DOF
@@ -213,12 +214,18 @@ def build_ofc_svd(iZs, k_min, k_max, n_keep, n_dof=None,
     the one ts_ofc's configuration names) and returns the :class:`OFCSvd`
     dataclass its callers expect.  Verified to reproduce the former in-module
     SVD bit for bit.
+
+    ``ofc_config_dir`` selects the OFC configuration directory, and with it the
+    sensitivity matrix; None uses the ts_config_mttcs default.  The
+    normalization weights come from ``ofc_normalization_yaml`` either way.
     """
     from lsst.ts.ofc import DoubleZernikeStateEstimator, OFCData
 
     nw_full = load_normalization_weights(ofc_normalization_yaml, norm_yaml_name)
     estimator = DoubleZernikeStateEstimator(
-        OFCData(instrument), iZs, k_min, k_max, n_keep, n_dof=n_dof,
+        OFCData(instrument, config_dir=(None if ofc_config_dir is None
+                                        else str(ofc_config_dir))),
+        iZs, k_min, k_max, n_keep, n_dof=n_dof,
         normalization_weights=nw_full)
 
     return OFCSvd(

@@ -121,6 +121,9 @@ def main():
     ap.add_argument('--tables-dir', default=None,
                     help='Dir holding the phase-1 donuts/visits.parquet '
                          '(default: output/<ps>)')
+    ap.add_argument('--ofc-config-dir', default=None,
+                    help='OFC config directory whose sensitivity matrix the SVD '
+                         'uses (default: the ts_config_mttcs one)')
     args = ap.parse_args()
 
     cfg = mc.load_mi_config(args.param_set, args.mi_name,
@@ -210,7 +213,9 @@ def main():
 
     # ---- OFC SVD (ofc_svd replaces the notebook inline build) ----
     svd = osv.build_ofc_svd(iZs, k_min, k_max, n_keep_spec, n_dof=n_dof_spec,
-                            ofc_normalization_yaml=ofc_norm_yaml)
+                            ofc_normalization_yaml=ofc_norm_yaml,
+                            ofc_config_dir=args.ofc_config_dir)
+    print(f'  OFC config: {args.ofc_config_dir or "ts_config_mttcs default"}')
     U_eff, V, Sigma = svd.U_eff, svd.V, svd.Sigma
     kj_grid, n_keep_eff = svd.kj_grid, svd.n_keep_eff
     normalization_weights = svd.normalization_weights
