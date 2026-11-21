@@ -112,11 +112,13 @@ def test_decompose_edge_has_no_nan_and_fits_data(assign):
                                  m_max=12, ridge=1e-3, degen_assignment=assign)
     O = dec['O_pol'].real
     C = dec['C_pol'].real
-    # every ring with data is defined (the sparse outermost one by continuation)
+    # every ring with data is defined (the sparse outermost one by
+    # continuation)
     assert np.isfinite(O).all() and np.isfinite(C).all()
     assert dec['ring_filled'][-1] and not dec['ring_filled'][:-1].any()
     assert dec['ring_rank'][-1] == -1
-    # the outer, partially covered rings have null directions; the inner ones none
+    # the outer, partially covered rings have null directions; the inner ones
+    # none
     null = dec['ring_null_dim']
     assert (null[R < 1.3] == 0).all()
     assert (null[(R >= 1.4) & (R < 1.74)] > 0).any()
@@ -146,7 +148,8 @@ def test_assignment_moves_unconstrained_signal_but_not_the_fit():
                        pred[fitted])
     # same prediction on the fitted, sampled nodes whatever the assignment: the
     # null directions carry singular values below null_tol x the largest, so
-    # moving along them changes the fitted data by a few percent of its RMS at most
+    # moving along them changes the fitted data by a few percent of its RMS at
+    # most
     scale = np.sqrt(np.mean(out['split'][2] ** 2))
     assert np.max(np.abs(out['ocs'][2] - out['split'][2])) < 0.1 * scale
     assert np.max(np.abs(out['ccs'][2] - out['split'][2])) < 0.1 * scale
@@ -155,7 +158,7 @@ def test_assignment_moves_unconstrained_signal_but_not_the_fit():
 
 
 def test_interior_identical_to_plain_ridge():
-    """Full-coverage rings: the rank-aware solve reproduces the old ridge solve."""
+    """Full-coverage rings: rank-aware solve matches the old ridge solve."""
     R, A, th, Z, valid, _, _ = _synthetic()
     Zc = Z.astype(complex)
     dec = isp.decompose_spin_lsq(Zc, valid, th, A, n_spin=0, s=1, m_max=12,

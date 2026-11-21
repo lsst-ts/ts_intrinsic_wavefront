@@ -103,6 +103,8 @@ rule all:
     input:
         # the MIW OCS/CCS maps calibration, per (param_set, mi_name)
         [f"output/{ps}/{mi}/intrinsic_split_maps.parquet" for ps, mi in MI_PAIRS],
+        # the per-donut MIW sidecar (row-aligned to donuts.parquet)
+        [f"output/{ps}/{mi}/zk_intrinsic.parquet" for ps, mi in MI_PAIRS],
 
 # ---- per chunk: mktable (Butler) -> donuts + visits ----
 rule mktable:
@@ -207,4 +209,24 @@ rule intrinsic_split:
     log: "logs/{ps}.{mi}.intrinsic_split.log"
     shell:
         "run_intrinsic_split.py --param-set {wildcards.ps} "
+        "--mi-name {wildcards.mi} > {log} 2>&1"
+
+# ---- per-donut measured-intrinsic sidecar (row-aligned to donuts.parquet) ----
+# Evaluates the OCS/CCS decomposition at each donut's field position and rotator
+# angle (reconstruct_at) plus the per-donut CCD-height Z4, producing the MIW
+# vector per donut.  Reads the split's decomp parquet; the FAM donuts table and
+# per-visit rotator angles from visits.parquet.
+rule intrinsic_sidecar:
+    input:
+        decomp = "output/{ps}/{mi}/intrinsic_split_decomp.parquet",
+        donuts = "output/{ps}/donuts.parquet",
+        visits = "output/{ps}/visits.parquet",
+        script = f"{BIN}/run_make_intrinsic_sidecar.py",
+        lib    = f"{WF}/intrinsic_split.py",
+    output: "output/{ps}/{mi}/zk_intrinsic.parquet"
+    params: cfg = lambda w: mi_cfg_json(w.ps, w.mi)   # rerun-trigger only
+    resources: mem_mb=8000
+    log: "logs/{ps}.{mi}.intrinsic_sidecar.log"
+    shell:
+        "run_make_intrinsic_sidecar.py --param-set {wildcards.ps} "
         "--mi-name {wildcards.mi} > {log} 2>&1"

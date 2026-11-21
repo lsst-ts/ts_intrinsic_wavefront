@@ -46,7 +46,8 @@ exported and point at the same name table:
 Usage
 -----
 
-    from lsst.ts.intrinsic.wavefront.common.zernike_names import NOLL_NAMES, NOLL_FORMULAS
+    from lsst.ts.intrinsic.wavefront.common.zernike_names import (
+        NOLL_NAMES, NOLL_FORMULAS)
 
     >>> NOLL_NAMES[6]
     'Astig0'

@@ -36,16 +36,18 @@ from astropy.table import Table
 # Source: Guillem's estimate (≈ 0.15 μm Z4 per 10 μm of local height).
 HEIGHT_TO_Z4_UM_PER_MM = 15.0
 
-# Orientation mapping cameraGeom focal-plane mm -> the batoid_rubin per-detector
-# Bicubic height-map frame, as (swap_xy, sign_x, sign_y).  ESTABLISHED (not guessed)
-# by comparing batoid_rubin .sag against the LSST_FP_cold metrology surface over the
-# 4 corner-WFS rafts + a science CCD (R22S11): swap=True,+1,+1 gave 12415/12415 points
-# in-domain and the lowest RMS (1.0 μm).  See aos/wfs_ccd_height_compare.* .
+# Orientation mapping cameraGeom focal-plane mm -> the batoid_rubin
+# per-detector Bicubic height-map frame, as (swap_xy, sign_x, sign_y).
+# ESTABLISHED (not guessed) by comparing batoid_rubin .sag against the
+# LSST_FP_cold metrology surface over the 4 corner-WFS rafts + a science CCD
+# (R22S11): swap=True,+1,+1 gave 12415/12415 points in-domain and the lowest
+# RMS (1.0 μm).  See aos/wfs_ccd_height_compare.* .
 BATOID_FP_ORIENTATION = (True, 1, 1)
 
-# Corner-WFS nominal piston (mm): SW0 extra-focal +, SW1 intra-focal -.  Removed from
-# the metrology surface so its height is the figure deviation (consistent with the
-# at-focus science CCDs).  Verified by the same metrology-vs-batoid comparison.
+# Corner-WFS nominal piston (mm): SW0 extra-focal +, SW1 intra-focal -.
+# Removed from the metrology surface so its height is the figure deviation
+# (consistent with the at-focus science CCDs).  Verified by the same
+# metrology-vs-batoid comparison.
 WFS_DEFOCAL_MM = 1.5
 
 
@@ -92,6 +94,50 @@ def compute_fp_coords(donut_df, camera,
     return fpx, fpy
 
 
+def field_to_pixel(donut_df, camera, thx_col='thx_CCS', thy_col='thy_CCS',
+                   det_col='detector'):
+    """Per-donut pixel position on its own detector, from its CCS field angle.
+
+    For unpaired corner-sensor tables, which carry a field angle but no pixel
+    centroids. The result can stand in for the centroid columns of
+    `compute_ccd_heights`.
+
+    Parameters
+    ----------
+    donut_df : pandas.DataFrame or astropy.QTable
+        Must contain `thx_col`, `thy_col` (CCS field angle, rad) and
+        `det_col`.
+    camera : lsst.afw.cameraGeom.Camera
+    thx_col, thy_col, det_col : str
+
+    Returns
+    -------
+    x_pix, y_pix : ndarray
+        Pixel position on the named detector; NaN off any known detector.
+    """
+    import lsst.geom as geom
+    from lsst.afw.cameraGeom import FIELD_ANGLE, FOCAL_PLANE, PIXELS
+
+    det_names = np.asarray(donut_df[det_col]).astype(str)
+    thx = np.asarray(donut_df[thx_col], dtype=float)
+    thy = np.asarray(donut_df[thy_col], dtype=float)
+    to_fp = camera.getTransform(FIELD_ANGLE, FOCAL_PLANE)
+    x_pix = np.full_like(thx, np.nan)
+    y_pix = np.full_like(thy, np.nan)
+    for det in camera:
+        mask = det_names == det.getName()
+        if not np.any(mask):
+            continue
+        to_pix = det.getTransform(FOCAL_PLANE, PIXELS)
+        # cameraGeom's FIELD_ANGLE is (thy, thx) in this package's CCS
+        # convention; (thx, thy) lands the point about 27 mm away.
+        pts = to_pix.applyForward(to_fp.applyForward(
+            [geom.Point2D(b, a) for a, b in zip(thx[mask], thy[mask])]))
+        x_pix[mask] = [q.getX() for q in pts]
+        y_pix[mask] = [q.getY() for q in pts]
+    return x_pix, y_pix
+
+
 # ----------------------------------------------------------------------
 # Height-map I/O + KNN interpolator
 # ----------------------------------------------------------------------
@@ -106,7 +152,8 @@ def make_metrology_table(file, rsid=None, include_wfs=True):
     Parameters
     ----------
     file : str or Path
-        FITS file path (e.g. ``LSST_FP_cold_b_measurement_4col_bysurface.fits``).
+        FITS file path (e.g.
+        ``LSST_FP_cold_b_measurement_4col_bysurface.fits``).
     rsid : str, optional
         Restrict to a single raft-sensor identifier (e.g. ``'R22S11'``).
 
@@ -122,9 +169,10 @@ def make_metrology_table(file, rsid=None, include_wfs=True):
             extname = hdu.header.get('EXTNAME', '')
             if rsid is not None and extname != rsid:
                 continue
-            # science sensor 'R##S##'  or  corner-WFS 'R##WFS0/1' (det 'R##_SW0/1').
-            # The corner WFS sit at the nominal +/-WFS_DEFOCAL_MM piston, removed here
-            # so z is the figure deviation like the at-focus science CCDs.
+            # science sensor 'R##S##'  or  corner-WFS 'R##WFS0/1' (det
+            # 'R##_SW0/1'). The corner WFS sit at the nominal +/-WFS_DEFOCAL_MM
+            # piston, removed here so z is the figure deviation like the
+            # at-focus science CCDs.
             m_sci = re.fullmatch(r'R\d\dS\d\d', extname)
             m_wfs = re.fullmatch(r'R(\d\d)WFS([01])', extname)
             if m_sci:
@@ -187,7 +235,7 @@ def height_to_z4(height_mm, factor=HEIGHT_TO_Z4_UM_PER_MM):
 # ----------------------------------------------------------------------
 
 def ccd_centers_fp(camera):
-    """Return {detector_name: (cx_mm, cy_mm)} for every detector in `camera`."""
+    """Return {detector_name: (cx_mm, cy_mm)} for each `camera` detector."""
     from lsst.ts.intrinsic.wavefront.common.camera_utils import pixel_to_focal
 
     centers = {}

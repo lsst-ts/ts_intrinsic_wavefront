@@ -5,9 +5,9 @@ wavefront models, retrieves rotator angles and thermal data, and saves
 the results as HDF5 files.
 
 Usage from notebook:
-    from lsst.ts.intrinsic.wavefront.intrinsics_lib import run_mktable, PARAM_SETS
-    params = PARAM_SETS['fam_danish_triplets']
-    aosTable, visit_info = await run_mktable(**params, coord_sys='OCS')
+    from lsst.ts.intrinsic.wavefront.intrinsics_lib import run_mktable,
+    PARAM_SETS params = PARAM_SETS['fam_danish_triplets'] aosTable, visit_info
+    = await run_mktable(**params, coord_sys='OCS')
 
 Usage from CLI:
     python run_mktable.py --param-set fam_danish_triplets
@@ -29,7 +29,6 @@ from tqdm import tqdm
 
 # LSST imports (available on RSP)
 from lsst.daf.butler import Butler, DatasetNotFoundError
-import lsst.afw.cameraGeom as cameraGeom
 from lsst.obs.lsst import LsstCam
 from lsst.ts.wep.task.estimateZernikesDanishTask import EstimateZernikesDanishTask
 from lsst.ts.wep.task import CalcZernikesTask, CalcZernikesTaskConfig
@@ -144,32 +143,46 @@ DEFAULT_MATCHED_THRESHOLD_ARCSEC = None
 # Visit marker scheme (shared by all per-visit AOS plots)
 # ============================================================
 #
-# Color    = elevation bucket (centered on 30, 40, 50, 60, 70 deg ±5°)
+# Color    = elevation bucket (centered on 30, 40, 50, 60, 70, 75 deg,
+#            within ±ELEV_HALFWIDTH_DEG of a center)
 # Shape    = chunky arrow pointing in the rotator direction, one of nine
 #            buckets (-60, -45, -30, -15, 0, 15, 30, 45, 60 deg)
-# Edge     = filter band; i-band uses edge = face (no visible outline);
-#            other bands get a distinctive outline color so the few
-#            non-i visits are easy to spot
+# Band dot = a small dot overlaid at the center of the arrow shaft, filled
+#            with the Rubin standard color for the filter band. The dot sits
+#            on top of the arrow so the elevation color stays readable; an
+#            edge outline would hide it.
 
-ELEV_CENTERS  = (30, 40, 50, 60, 70)
-ELEV_HALFWIDTH = 5
+# 75 deg is a real observed elevation (the BLOCK-T720 upward bounce leg) and
+# sits only 5 deg from the 70 deg center, so the buckets are narrower than the
+# 10 deg spacing would allow: the half-width is a parameter, defaulting to
+# 2 deg, which cleanly separates 70 from 75.
+ELEV_CENTERS  = (30, 40, 50, 60, 70, 75)
+ELEV_HALFWIDTH_DEG = 2.0
 ROT_CENTERS   = (-60, -45, -30, -15, 0, 15, 30, 45, 60)
 
 ELEV_COLORS = {
     30: 'tab:blue', 40: 'tab:green', 50: 'tab:orange',
-    60: 'tab:red',  70: 'tab:purple',
+    60: 'tab:red',  70: 'tab:purple', 75: 'tab:brown',
 }
 
-# Band → marker edge color. None for i-band means "edge = face color"
-# (no visible outline); all the other bands get a distinct outline.
-BAND_EDGE_COLORS = {
-    'u': 'magenta',
-    'g': 'lime',
-    'r': 'red',
-    'i': None,
-    'z': 'gold',
-    'y': 'black',
+# Band → dot face color, for the small dot overlaid on the arrow shaft.
+# The Rubin standard filter palette, taken from `lsst.utils.plotting`
+# (`get_band_dicts()['colors']`, DM-51122 revised in DM-51690) so this stays
+# in step with the observatory-wide convention. The literal below is the
+# w_2026_33 value, used only if lsst.utils is unavailable.
+BAND_COLORS = {
+    'u': '#1600EA', 'g': '#31DE1F', 'r': '#B52626',
+    'i': '#370201', 'z': '#BA52FF', 'y': '#61A2B3',
 }
+try:
+    from lsst.utils.plotting import get_band_dicts as _get_band_dicts
+    BAND_COLORS = dict(_get_band_dicts()['colors'])
+except Exception:          # no lsst.utils (or API change) — keep the literal
+    pass
+
+# Size of the band dot, as a fraction of the host marker's markersize. Kept
+# small so the arrow's direction (the rotator angle) stays readable under it.
+BAND_DOT_SIZE_FRAC = 0.34
 
 
 def _arrow_marker(angle_deg, head_w=1.30, head_h=0.70, shaft_w=0.50):
@@ -214,14 +227,35 @@ def _alt_to_deg(alt_value):
     return np.rad2deg(a) if abs(a) < 2.0 * np.pi + 1e-3 else a
 
 
-def _classify_elev(alt_deg):
-    """Return the nearest elevation bucket center, or None if outside all."""
+def _classify_elev(alt_deg, halfwidth_deg=None):
+    """Return the matching elevation bucket center, or None if outside all.
+
+    Parameters
+    ----------
+    alt_deg : `float`
+        Elevation in degrees.
+    halfwidth_deg : `float`, optional
+        Half-width of the acceptance window about each center, in degrees.
+        Defaults to `ELEV_HALFWIDTH_DEG`. Centers 70 and 75 deg are only
+        5 deg apart, so a half-width above 2.5 deg makes them ambiguous.
+
+    Returns
+    -------
+    center : `int` or `None`
+        The nearest center within `halfwidth_deg` degrees, or None if the
+        value falls outside every window.
+    """
     if not np.isfinite(alt_deg):
         return None
+    hw = ELEV_HALFWIDTH_DEG if halfwidth_deg is None else float(halfwidth_deg)
+    # Nearest center wins, so overlapping windows degrade gracefully rather
+    # than letting declaration order decide.
+    best, best_d = None, None
     for c in ELEV_CENTERS:
-        if (c - ELEV_HALFWIDTH) <= alt_deg < (c + ELEV_HALFWIDTH):
-            return c
-    return None
+        d = abs(alt_deg - c)
+        if d <= hw and (best_d is None or d < best_d):
+            best, best_d = c, d
+    return best
 
 
 def _classify_rot(rot_deg):
@@ -232,24 +266,30 @@ def _classify_rot(rot_deg):
     return int(centers[int(np.argmin(np.abs(centers - rot_deg)))])
 
 
-def classify_visit(alt_deg=None, rot_deg=None, band=None):
+def classify_visit(alt_deg=None, rot_deg=None, band=None,
+                   elev_halfwidth_deg=None):
     """Classify a visit's elev/rot/band into the marker-scheme buckets.
 
     Parameters
     ----------
-    alt_deg : float, optional
+    alt_deg : `float`, optional
         Elevation in degrees (radians OK, auto-detected).
-    rot_deg : float, optional
+    rot_deg : `float`, optional
         Rotator angle in degrees.
-    band : str, optional
+    band : `str`, optional
         Filter band; first character is used (e.g. 'i_06' → 'i').
+    elev_halfwidth_deg : `float`, optional
+        Half-width in degrees of the elevation acceptance window about each
+        center. Defaults to `ELEV_HALFWIDTH_DEG`.
 
     Returns
     -------
-    dict with keys 'elev', 'rot', 'band' — values are the bucket center
-    (int) or None for missing/out-of-range, and a one-character band.
+    buckets : `dict`
+        Keys 'elev', 'rot', 'band' — values are the bucket center (`int`) or
+        None for missing/out-of-range, and a one-character band.
     """
-    elev = _classify_elev(_alt_to_deg(alt_deg)) if alt_deg is not None else None
+    elev = (_classify_elev(_alt_to_deg(alt_deg), elev_halfwidth_deg)
+            if alt_deg is not None else None)
     rot = _classify_rot(rot_deg) if rot_deg is not None else None
     if band is None:
         b = None
@@ -268,34 +308,113 @@ def visit_marker_style(elev=None, rot=None, band=None,
 
     Returns a dict suitable for plt.plot(...): marker, color, mfc, mec,
     mew, markersize, linestyle.
+
+    Notes
+    -----
+    The filter band is **not** encoded here. Band is drawn as a separate small
+    dot on top of the arrow — see `visit_band_dot_style` and
+    `plot_visit_point`. Encoding band as a marker edge, as this function used
+    to, hid the elevation fill color and made non-i bands unreadable.
     """
     if elev is None or rot is None:
         return dict(marker=fallback_marker, color=fallback_color,
                     markersize=base_size, linestyle='')
     color = ELEV_COLORS[elev]
     marker = _rot_markers()[rot]
-    edge = BAND_EDGE_COLORS.get(band, None) if band is not None else None
-    if edge is None:
-        mec = color
-        mew = 0.0
-        size = base_size
-    else:
-        mec = edge
-        mew = 1.5
-        size = base_size + 1
-    if iter_ == 2:
-        mfc = 'none'
-    else:
-        mfc = color
-    return dict(marker=marker, color=color, mfc=mfc, mec=mec, mew=mew,
-                markersize=size, linestyle='')
+    mfc = 'none' if iter_ == 2 else color
+    return dict(marker=marker, color=color, mfc=mfc, mec=color, mew=0.0,
+                markersize=base_size, linestyle='')
 
 
-def build_visit_marker_lookup(visit_info):
+def visit_band_dot_style(band, host_size=7, size_frac=None):
+    """Plot kwargs for the small band dot overlaid on a visit marker.
+
+    The dot is drawn at the same (x, y) as the arrow marker, which places it
+    at the center of the arrow's shaft, and is filled with the Rubin standard
+    color for the band (`BAND_COLORS`, DM-51122 revised in DM-51690).
+
+    Parameters
+    ----------
+    band : `str` or `None`
+        Filter band; the first character is used. None or an unrecognized
+        band returns None.
+    host_size : `float`, optional
+        `markersize` of the arrow marker the dot sits on, in points.
+    size_frac : `float`, optional
+        Dot size as a fraction of `host_size` (dimensionless). Defaults to
+        `BAND_DOT_SIZE_FRAC`.
+
+    Returns
+    -------
+    kwargs : `dict` or `None`
+        Kwargs for plt.plot(...), or None if the band is unknown.
+    """
+    if band is None:
+        return None
+    b = str(band).strip().lower()[:1]
+    color = BAND_COLORS.get(b)
+    if color is None:
+        return None
+    frac = BAND_DOT_SIZE_FRAC if size_frac is None else float(size_frac)
+    # No edge: on a small arrow an outline eats into the shaft and blurs the
+    # direction the arrow is encoding.
+    return dict(marker='o', color=color, mfc=color, mec=color, mew=0.0,
+                markersize=max(1.2, host_size * frac), linestyle='')
+
+
+def plot_visit_point(ax, x, y, style, band=None, dot_size_frac=None,
+                     **kwargs):
+    """Draw one visit marker plus its band dot on `ax`.
+
+    This is the generic drawer every per-visit AOS plot should use, so the
+    arrow (elevation color, rotator shape) and the band dot stay consistent
+    across products.
+
+    Parameters
+    ----------
+    ax : `matplotlib.axes.Axes`
+        Axes to draw on.
+    x, y : `float` or `array_like`
+        Point position, in data coordinates.
+    style : `dict`
+        Marker kwargs from `visit_marker_style`.
+    band : `str`, optional
+        Filter band. If None or unrecognized, no dot is drawn.
+    dot_size_frac : `float`, optional
+        Passed to `visit_band_dot_style` as `size_frac` (dimensionless).
+    **kwargs
+        Extra kwargs applied to the arrow marker (e.g. `zorder`, `alpha`,
+        `label`). `zorder` also lifts the dot so it stays on top.
+
+    Returns
+    -------
+    lines : `list`
+        The Line2D objects drawn: the arrow, and the dot when present.
+    """
+    st = dict(style)
+    st.update(kwargs)
+    out = list(ax.plot([x], [y], **st))
+    dot = visit_band_dot_style(
+        band, host_size=st.get('markersize', 7), size_frac=dot_size_frac)
+    if dot is not None:
+        dot['zorder'] = st.get('zorder', 2) + 0.1
+        out += list(ax.plot([x], [y], **dot))
+    return out
+
+
+def build_visit_marker_lookup(visit_info, elev_halfwidth_deg=None):
     """Build a (day_obs, seq_num) → classified-visit dict from a visits table.
 
     Reads `alt`, `rotator_angle`, and `band` columns when present. Useful
     for joining marker styles onto a fit table indexed by (day_obs, seq_num).
+
+    Parameters
+    ----------
+    visit_info : `astropy.table.Table`
+        Visits table with `day_obs` and `seq_num`, optionally `alt` (deg or
+        rad), `rotator_angle` (deg) and `band`.
+    elev_halfwidth_deg : `float`, optional
+        Elevation bucket half-width in degrees, passed to `classify_visit`.
     """
     has_alt = 'alt' in visit_info.colnames
     has_rot = 'rotator_angle' in visit_info.colnames
@@ -307,18 +426,27 @@ def build_visit_marker_lookup(visit_info):
         alt = float(v['alt']) if has_alt else None
         rot = float(v['rotator_angle']) if has_rot else None
         band = str(v['band']) if has_band else None
-        out[(d, s)] = classify_visit(alt_deg=alt, rot_deg=rot, band=band)
+        out[(d, s)] = classify_visit(alt_deg=alt, rot_deg=rot, band=band,
+                                     elev_halfwidth_deg=elev_halfwidth_deg)
     return out
 
 
 def markers_legend_figure(show_iter_distinction=False, show_band_legend=True,
-                          figsize=(11, 8.5)):
+                          figsize=(11, 8.5), elev_halfwidth_deg=None):
     """Standalone matplotlib figure documenting the marker scheme.
 
-    show_iter_distinction : add a third legend explaining iter1=filled,
-        iter2=open (used on tracking PDFs).
-    show_band_legend : show the band → edge-color legend (suppress if
-        all visits in your data are i-band).
+    Parameters
+    ----------
+    show_iter_distinction : `bool`, optional
+        Add a legend explaining iter1=filled, iter2=open (tracking PDFs).
+    show_band_legend : `bool`, optional
+        Show the band → dot-color legend (suppress if every visit in the
+        data is i-band).
+    figsize : `tuple`, optional
+        Figure size in inches.
+    elev_halfwidth_deg : `float`, optional
+        Half-width in degrees quoted in the elevation labels. Defaults to
+        `ELEV_HALFWIDTH_DEG`.
     """
     import matplotlib.pyplot as plt
     fig = plt.figure(figsize=figsize)
@@ -341,8 +469,9 @@ def markers_legend_figure(show_iter_distinction=False, show_band_legend=True,
     elev_handles = [plt.Line2D([], [], linestyle='', marker='o',
                                markersize=10, color=c)
                     for c in ELEV_COLORS.values()]
-    elev_labels = [f'alt ∈ [{c - ELEV_HALFWIDTH}, {c + ELEV_HALFWIDTH}) → {c}°'
-                   for c in ELEV_COLORS]
+    _hw = (ELEV_HALFWIDTH_DEG if elev_halfwidth_deg is None
+           else float(elev_halfwidth_deg))
+    elev_labels = [f'alt = {c} ± {_hw:g}°' for c in ELEV_COLORS]
     leg2 = ax.legend(elev_handles, elev_labels,
                      loc='upper right', bbox_to_anchor=(0.95, 0.95),
                      title='elevation (marker color)',
@@ -352,20 +481,14 @@ def markers_legend_figure(show_iter_distinction=False, show_band_legend=True,
     if show_band_legend:
         band_handles = []
         band_labels = []
-        for b, edge in BAND_EDGE_COLORS.items():
-            if edge is None:
-                edge_disp = 'tab:purple'  # fill color shown for visibility
-                lbl = f'{b} band — no distinct edge'
-            else:
-                edge_disp = edge
-                lbl = f'{b} band'
+        for b, dot in BAND_COLORS.items():
             band_handles.append(plt.Line2D([], [], linestyle='', marker='o',
-                                           markersize=10, color='tab:purple',
-                                           mec=edge_disp, mew=1.5))
-            band_labels.append(lbl)
+                                           markersize=8, color=dot, mfc=dot,
+                                           mec='white', mew=0.6))
+            band_labels.append(f'{b} band')
         leg3 = ax.legend(band_handles, band_labels,
                          loc='lower right', bbox_to_anchor=(0.95, 0.05),
-                         title='filter band (marker edge)',
+                         title='filter band (dot on arrow shaft)',
                          fontsize=9, title_fontsize=10, frameon=True)
         ax.add_artist(leg3)
 
@@ -386,6 +509,7 @@ def markers_legend_figure(show_iter_distinction=False, show_band_legend=True,
             ha='center', va='center', transform=ax.transAxes,
             fontsize=10, color='gray')
     return fig
+
 
 # Per-visit quality cuts. Computed per visit during mktable, stored as
 # numeric columns in visit_info, and re-applied at use time via
@@ -432,7 +556,8 @@ def parse_collection_info(collections, include_versions=False):
     For a simple collection like 'aos_fam_danish_triplets':
         collection_phrase = 'aos_fam_danish_triplets', dates = (None, None)
 
-    For 'u/brycek/aos_fam_danish_step2/wep_v16_5_0/donut_viz_v3_2_3/20251020_20251231':
+    For the collection
+    'u/brycek/aos_fam_danish_step2/wep_v16_5_0/donut_viz_v3_2_3/20251020_20251231':
         - Drop leading 'u/USERNAME/'
         - collection_phrase = 'aos_fam_danish_step2'
         - Optionally append version strings if include_versions=True
@@ -514,7 +639,11 @@ def get_aggregate_zernikes(butler, day_obs, seq_num, coord_sys, camera,
         'day_obs': day_obs,
         'seq_num': seq_num,
         'visit': meta.get('visit', None),
-        'skyAngle': meta.get('rotAngle', np.nan),
+        # The camera rotator angle the pipeline used for its own CCS -> OCS
+        # rotation, radians in this table family.  The old `skyAngle` column
+        # held `rotAngle` (= visitInfo.boresightRotAngle), which is the sky
+        # position angle of the boresight, not the rotator.
+        'rotTelPos': meta.get('rotTelPos', np.nan),
         'ra': meta.get('ra', np.nan),
         'dec': meta.get('dec', np.nan),
         'az': meta.get('az', np.nan),
@@ -544,8 +673,8 @@ def get_aggregate_zernikes(butler, day_obs, seq_num, coord_sys, camera,
     if fwhm is not None:
         fwhm_arr = np.array(fwhm)
         # Prefer the selected-length match: when no donuts are dropped
-        # len(aosTable) == len(aosTable_sel) and the array is already aligned to
-        # the selection, so applying `select` again would be wrong.
+        # len(aosTable) == len(aosTable_sel) and the array is already aligned
+        # to the selection, so applying `select` again would be wrong.
         if len(fwhm_arr) == len(aosTable_sel):
             aosTable_sel['blur'] = fwhm_arr
         elif len(fwhm_arr) == len(aosTable):
@@ -659,8 +788,8 @@ def _astropy_table_to_pyarrow(tbl):
         data = tbl[col]
         arr = np.asarray(data)
         if arr.ndim == 2:
-            # Per-row array column (e.g. zk_OCS shape (n, n_zk))
-            # Pass as a list of per-row numpy arrays; pyarrow infers list<float>
+            # Per-row array column (e.g. zk_OCS shape (n, n_zk)) Pass as a list
+            # of per-row numpy arrays; pyarrow infers list<float>
             rows = [np.ascontiguousarray(arr[i]) for i in range(arr.shape[0])]
             arrays.append(pa.array(rows))
         elif arr.dtype.kind == 'O':
@@ -869,7 +998,7 @@ def stream_zernikes_to_parquet(visit_pairs, collections, butler_repo, coord_sys,
                                matched_threshold_arcsec=DEFAULT_MATCHED_THRESHOLD_ARCSEC,
                                min_donuts_per_detector=DEFAULT_MIN_DONUTS_PER_DETECTOR,
                                workers=1):
-    """Stream aggregate Zernikes per visit to parquet (one row group per visit).
+    """Stream aggregate Zernikes per visit to parquet (a row group each).
 
     List/array columns (zk_OCS, zk_intrinsic_OCS, etc.) are stored as
     native parquet list<float> — no explode/restack, so the file is
@@ -974,7 +1103,7 @@ def stream_zernikes_to_parquet(visit_pairs, collections, butler_repo, coord_sys,
     print(f"{'='*60}\n")
 
     if success_count == 0:
-        print(f"\nERROR: No Zernike data found for any visits!")
+        print("\nERROR: No Zernike data found for any visits!")
         print(f"Collections used: {collections}")
         return None
 
@@ -983,7 +1112,7 @@ def stream_zernikes_to_parquet(visit_pairs, collections, butler_repo, coord_sys,
     visit_info['day_obs'] = [m['day_obs'] for m in visit_meta_list]
     visit_info['seq_num'] = [m['seq_num'] for m in visit_meta_list]
     visit_info['visit'] = [m['visit'] for m in visit_meta_list]
-    visit_info['skyAngle'] = [m['skyAngle'] for m in visit_meta_list]
+    visit_info['rotTelPos'] = [m['rotTelPos'] for m in visit_meta_list]
     visit_info['ra'] = [m['ra'] for m in visit_meta_list]
     visit_info['dec'] = [m['dec'] for m in visit_meta_list]
     visit_info['az'] = [m['az'] for m in visit_meta_list]
@@ -1051,7 +1180,7 @@ def get_zernikes_from_visits(visit_pairs, collections, butler_repo, coord_sys,
         success_count += 1
 
     print(f"\n{'='*60}")
-    print(f"Extraction Summary:")
+    print("Extraction Summary:")
     print(f"  Total visits attempted: {len(visit_pairs)}")
     print(f"  Successful extractions: {success_count}")
     print(f"  Failed extractions:     {error_count}")
@@ -1061,7 +1190,7 @@ def get_zernikes_from_visits(visit_pairs, collections, butler_repo, coord_sys,
         print(f"  nollIndices: {ref_noll_indices}")
 
     if len(agg_zernikes_list) == 0:
-        print(f"\nERROR: No Zernike data found for any visits!")
+        print("\nERROR: No Zernike data found for any visits!")
         print(f"Collections used: {collections}")
         return None, None
 
@@ -1074,7 +1203,7 @@ def get_zernikes_from_visits(visit_pairs, collections, butler_repo, coord_sys,
     visit_info['day_obs'] = [m['day_obs'] for m in visit_meta_list]
     visit_info['seq_num'] = [m['seq_num'] for m in visit_meta_list]
     visit_info['visit'] = [m['visit'] for m in visit_meta_list]
-    visit_info['skyAngle'] = [m['skyAngle'] for m in visit_meta_list]
+    visit_info['rotTelPos'] = [m['rotTelPos'] for m in visit_meta_list]
     visit_info['ra'] = [m['ra'] for m in visit_meta_list]
     visit_info['dec'] = [m['dec'] for m in visit_meta_list]
     visit_info['az'] = [m['az'] for m in visit_meta_list]
@@ -1205,7 +1334,12 @@ def get_rotator_angles(visits_df, visit_pairs):
 
 
 def get_visitinfo_rotator_angles(butler, visit_pairs):
-    """Get RotPA and parallactic angle from Butler raw.visitInfo."""
+    """Get RotPA and parallactic angle from Butler raw.visitInfo.
+
+    No longer part of the `get_rotator_data` chain: ``rotTelPos`` from the
+    donut metadata is the primary source and gives the same identity.  Kept as
+    a standalone cross-check.
+    """
     records = []
     print(f"Querying Butler visitInfo for {len(visit_pairs)} visits...")
     for day_obs_val, seq_num in tqdm(visit_pairs):
@@ -1259,7 +1393,12 @@ async def async_getEfdData_exprecord(client, topic, expRecord, columns=None,
 
 
 async def get_efd_rotator_angles(efd_client, butler, visit_pairs):
-    """Get actual rotator position from EFD MTRotator telemetry."""
+    """Get actual rotator position from EFD MTRotator telemetry.
+
+    No longer part of the `get_rotator_data` chain: the window-mean was not
+    reproducible between two runs of the same chunk, differing by up to
+    0.188 deg of camera rotator angle.  Kept as a standalone cross-check.
+    """
     records = []
     print(f"Querying EFD rotator positions for {len(visit_pairs)} visits...")
     for day_obs_val, seq_num in tqdm(visit_pairs):
@@ -1296,95 +1435,38 @@ async def get_efd_rotator_angles(efd_client, butler, visit_pairs):
 
 async def get_rotator_data(visits_df, visit_pairs, butler_repo,
                            rotator_threshold=DEFAULT_ROTATOR_THRESHOLD):
-    """Get rotator angles from all sources and compute best value.
+    """Get the ConsDB rotator angle per visit, as the fallback source.
 
-    Returns rotator_df with columns: day_obs, seq_num, physical_rotator_angle,
-    efd_rotator_angle, visitinfo_rotator_angle, rotator_angle, rotator_flagged.
+    The primary source is the donut table's own ``rotTelPos`` metadata, which
+    is read per visit by the extraction step and resolved in
+    `merge_rotator_to_visit_info`.  This function supplies only the ConsDB
+    fallback, so it no longer queries the EFD or Butler ``visitInfo``: the EFD
+    window-mean was not reproducible between two runs of the same chunk (up to
+    0.188 deg of camera rotator angle apart), and ``visitInfo`` gives the same
+    identity ``rotTelPos`` already holds.
+
+    Parameters
+    ----------
+    visits_df : `pandas.DataFrame`
+        ConsDB visit rows, carrying ``physical_rotator_angle`` in deg.
+    visit_pairs : `list` [`tuple`]
+        (``day_obs``, ``seq_num``) pairs, dimensionless integers.
+    butler_repo : `str`
+        Unused, kept so the signature is stable for existing callers.
+    rotator_threshold : `float`
+        Flag threshold on |rotator angle|, deg.
+
+    Returns
+    -------
+    rotator_df : `pandas.DataFrame`
+        Columns ``day_obs``, ``seq_num``, ``physical_rotator_angle`` (deg).
     """
     rotator_df = get_rotator_angles(visits_df, visit_pairs)
 
-    missing_mask = rotator_df['physical_rotator_angle'].isna()
-    missing_pairs = rotator_df.loc[missing_mask, ['day_obs', 'seq_num']].values.tolist()
-    n_missing = len(missing_pairs)
+    n_missing = int(rotator_df['physical_rotator_angle'].isna().sum())
     print(f"ConsDB physical_rotator_angle: "
-          f"{len(rotator_df) - n_missing} present, {n_missing} missing")
-
-    if n_missing > 0:
-        # Summarize missing visits by day_obs for quick inspection
-        missing_by_day = Counter(d for d, _ in missing_pairs)
-        print(f"  Missing from ConsDB — falling back to EFD, then Butler visitInfo:")
-        for d in sorted(missing_by_day):
-            day_total = sum(1 for dv, _ in visit_pairs if dv == d)
-            print(f"    day_obs={d}: {missing_by_day[d]}/{day_total} visits missing")
-        # Show individual missing visits (up to 20, then summary)
-        show_n = min(20, n_missing)
-        print(f"  First {show_n} missing (day_obs, seq_num):")
-        for d, s in missing_pairs[:show_n]:
-            print(f"    {d} {s}")
-        if n_missing > show_n:
-            print(f"    ... and {n_missing - show_n} more")
-
-        butler_rot = Butler(butler_repo, instrument='LSSTCam',
-                            collections=['LSSTCam/raw/all'])
-
-        # Step 1: try EFD first (faster — MTRotator.rotation queries)
-        efd_df = None
-        efd_client = None
-        try:
-            efd_client = makeEfdClient()
-            efd_df = await get_efd_rotator_angles(efd_client, butler_rot, missing_pairs)
-            rotator_df = rotator_df.merge(efd_df, on=['day_obs', 'seq_num'], how='left')
-        except Exception as e:
-            print(f"Warning: Could not access EFD: {e}")
-            rotator_df['efd_rotator_angle'] = np.nan
-        finally:
-            if efd_client is not None:
-                await _close_efd_client(efd_client)
-
-        # Step 2: for visits still missing (EFD returned NaN too), fall back
-        # to Butler visitInfo (much slower; only hit if needed)
-        still_missing_mask = (rotator_df['physical_rotator_angle'].isna()
-                              & rotator_df['efd_rotator_angle'].isna())
-        still_missing_pairs = rotator_df.loc[
-            still_missing_mask, ['day_obs', 'seq_num']].values.tolist()
-        n_still_missing = len(still_missing_pairs)
-
-        if n_still_missing > 0:
-            print(f"  After EFD: {n_still_missing}/{n_missing} still missing, "
-                  f"querying Butler visitInfo...")
-            visitinfo_df = get_visitinfo_rotator_angles(
-                butler_rot, still_missing_pairs)
-            rotator_df = rotator_df.merge(
-                visitinfo_df, on=['day_obs', 'seq_num'], how='left')
-        else:
-            print(f"  EFD filled all {n_missing} ConsDB-missing visits — "
-                  f"skipping Butler visitInfo queries")
-            rotator_df['visitinfo_rotator_angle'] = np.nan
-            rotator_df['visitinfo_rotpa'] = np.nan
-            rotator_df['visitinfo_par_angle'] = np.nan
-    else:
-        print("All visits have ConsDB physical_rotator_angle, "
-              "skipping EFD/visitInfo queries")
-        rotator_df['efd_rotator_angle'] = np.nan
-        rotator_df['visitinfo_rotator_angle'] = np.nan
-        rotator_df['visitinfo_rotpa'] = np.nan
-        rotator_df['visitinfo_par_angle'] = np.nan
-
-    # Best rotator: prefer ConsDB, then EFD, then visitInfo
-    rotator_df['rotator_angle'] = (
-        rotator_df['physical_rotator_angle']
-        .fillna(rotator_df.get('efd_rotator_angle', np.nan))
-        .fillna(rotator_df.get('visitinfo_rotator_angle', np.nan))
-    )
-    rotator_df['rotator_flagged'] = (
-        rotator_df['rotator_angle'].abs() > rotator_threshold)
-
-    n_flagged = rotator_df['rotator_flagged'].sum()
-    n_phys = rotator_df['physical_rotator_angle'].notna().sum()
-    n_efd = rotator_df['efd_rotator_angle'].notna().sum()
-    n_vi = rotator_df['visitinfo_rotator_angle'].notna().sum()
-    print(f"\nRotator angle sources: ConsDB={n_phys}, EFD={n_efd}, visitInfo={n_vi}")
-    print(f"Flagged (|angle| > {rotator_threshold} deg): {n_flagged}")
+          f"{len(rotator_df) - n_missing} present, {n_missing} missing "
+          "(the donut-metadata rotTelPos is the primary source)")
 
     return rotator_df
 
@@ -1575,6 +1657,59 @@ async def get_m1m3_gradients(efd_client, visit_table):
     return df[['x_gradient', 'y_gradient', 'z_gradient', 'radial_gradient']]
 
 
+def _thermal_from_consdb_transform(consdb_client, unique_visits):
+    """ESS air temps (+delta-Ts) and TMA truss from the ConsDB transformed EFD.
+
+    One bulk query on ``efd_lsstcam.exposure_efd`` (per-exposure means) keyed
+    by ``exposure_id``, replacing the per-visit ESS/truss EFD loops (which do
+    ~4 + 2 EFD round-trips per visit).  Returns ``(temp_df, truss_df)`` keyed
+    on ``(day_obs, seq_num)``, or ``(None, None)`` if the ``exposure_id`` link
+    or the transform columns are unavailable -- the caller then falls back to
+    the raw-EFD per-visit path.  M1M3 gradients are NOT here (the thermocouple
+    array is not in the transform); those stay on the raw-EFD per-day path.
+    """
+    if ('exposure_id' not in unique_visits
+            or unique_visits['exposure_id'].isna().all()):
+        return None, None
+    tmap = {"mt_salindex111_temperature_0_mean": "cam_air_temp",
+            "mt_salindex112_temperature_0_mean": "m2_air_temp",
+            "mt_salindex113_temperature_0_mean": "m1m3_air_temp",
+            "mt_salindex301_temperature_0_mean": "outside_temp"}
+    trmap = {"mt_salindex122_temperature_6": "tma_truss_temp_pxpy",
+             "mt_salindex122_temperature_7": "tma_truss_temp_mxmy"}
+    v = unique_visits.dropna(subset=['exposure_id']).copy()
+    v['exposure_id'] = v['exposure_id'].astype('int64')
+    ids = list(dict.fromkeys(v['exposure_id'].tolist()))
+    cols = list(tmap) + list(trmap)
+    frames = []
+    try:
+        for i in range(0, len(ids), 800):
+            idlist = ", ".join(str(x) for x in ids[i:i + 800])
+            q = (f"SELECT exposure_id, {', '.join(cols)} "
+                 f"FROM efd_lsstcam.exposure_efd WHERE exposure_id IN ({idlist})")
+            frames.append(consdb_client.query(q).to_pandas())
+    except Exception as e:
+        print(f"  ConsDB transform temps query failed ({type(e).__name__}: {e})")
+        return None, None
+    if not frames or sum(len(f) for f in frames) == 0:
+        return None, None
+    df = pd.concat(frames, ignore_index=True).drop_duplicates('exposure_id')
+    m = v[['day_obs', 'seq_num', 'exposure_id']].merge(df, on='exposure_id', how='left')
+    for c in cols:
+        if c in m:
+            m[c] = pd.to_numeric(m[c], errors='coerce')
+    temp_df = m[['day_obs', 'seq_num']].copy()
+    for src, name in tmap.items():
+        temp_df[name] = m[src] if src in m else np.nan
+    temp_df["m2_delta_t"] = temp_df["m2_air_temp"] - temp_df["m1m3_air_temp"]
+    temp_df["cam_m1m3_delta_t"] = temp_df["cam_air_temp"] - temp_df["m1m3_air_temp"]
+    temp_df["dome_delta_t"] = temp_df["outside_temp"] - temp_df["m1m3_air_temp"]
+    truss_df = m[['day_obs', 'seq_num']].copy()
+    for src, name in trmap.items():
+        truss_df[name] = m[src] if src in m else np.nan
+    return temp_df, truss_df
+
+
 async def get_thermal_data(consdb_client, efd_client, visit_info,
                            temp_time_window_sec=DEFAULT_TEMP_TIME_WINDOW_SEC):
     """Retrieve all thermal data for visits and return as a DataFrame.
@@ -1589,7 +1724,7 @@ async def get_thermal_data(consdb_client, efd_client, visit_info,
     day_obs_str = ", ".join(str(d) for d in day_obs_list)
 
     query = f"""
-        SELECT e.day_obs, e.seq_num, e.obs_start, e.obs_end
+        SELECT e.day_obs, e.seq_num, e.exposure_id, e.obs_start, e.obs_end
         FROM cdb_lsstcam.exposure e
         WHERE e.day_obs IN ({day_obs_str})
         ORDER BY e.day_obs, e.seq_num
@@ -1603,13 +1738,16 @@ async def get_thermal_data(consdb_client, efd_client, visit_info,
         'seq_num': np.array(visit_info['seq_num']),
     })
     vi_df = vi_df.merge(
-        consdb_df[['day_obs', 'seq_num', 'obs_start', 'obs_end']],
+        consdb_df[['day_obs', 'seq_num', 'exposure_id', 'obs_start', 'obs_end']],
         on=['day_obs', 'seq_num'], how='left',
     )
     n_matched = vi_df['obs_start'].notna().sum()
     print(f"Matched obs times for {n_matched}/{len(vi_df)} visits")
 
-    # ESS temperatures
+    # ESS air temps + TMA truss -- fast bulk read from the ConsDB transformed
+    # EFD (efd_lsstcam.exposure_efd per-exposure means), with the per-visit
+    # raw-EFD loops kept as a fallback for time ranges the transform doesn't
+    # cover.
     ess_sensors = {
         "cam_air_temp": 111,
         "m2_air_temp": 112,
@@ -1618,25 +1756,30 @@ async def get_thermal_data(consdb_client, efd_client, visit_info,
     }
 
     valid = vi_df.dropna(subset=['obs_start', 'obs_end']).copy()
-    unique_visits = valid[['day_obs', 'seq_num', 'obs_start', 'obs_end']].drop_duplicates()
-    print(f"Querying EFD temperatures for {len(unique_visits)} visits...")
+    ucols = ['day_obs', 'seq_num', 'obs_start', 'obs_end']
+    if 'exposure_id' in valid:
+        ucols = ucols + ['exposure_id']
+    unique_visits = valid[ucols].drop_duplicates()
 
-    temp_records = []
-    for _, row in tqdm(unique_visits.iterrows(), total=len(unique_visits)):
-        record = {"day_obs": row["day_obs"], "seq_num": row["seq_num"]}
-        for name, index in ess_sensors.items():
-            record[name] = await get_ess_temperature(
-                efd_client, row["obs_start"], row["obs_end"], index,
-                post_padding=temp_time_window_sec,
-            )
-        temp_records.append(record)
-
-    temp_df = pd.DataFrame(temp_records)
-
-    # Delta-T quantities
-    temp_df["m2_delta_t"] = temp_df["m2_air_temp"] - temp_df["m1m3_air_temp"]
-    temp_df["cam_m1m3_delta_t"] = temp_df["cam_air_temp"] - temp_df["m1m3_air_temp"]
-    temp_df["dome_delta_t"] = temp_df["outside_temp"] - temp_df["m1m3_air_temp"]
+    temp_df, truss_df = _thermal_from_consdb_transform(consdb_client, unique_visits)
+    if temp_df is not None:
+        print(f"ESS temps + TMA truss from ConsDB transform for {len(temp_df)} visits")
+    else:
+        print(f"Querying EFD temperatures for {len(unique_visits)} visits "
+              f"(per-visit fallback)...")
+        temp_records = []
+        for _, row in tqdm(unique_visits.iterrows(), total=len(unique_visits)):
+            record = {"day_obs": row["day_obs"], "seq_num": row["seq_num"]}
+            for name, index in ess_sensors.items():
+                record[name] = await get_ess_temperature(
+                    efd_client, row["obs_start"], row["obs_end"], index,
+                    post_padding=temp_time_window_sec,
+                )
+            temp_records.append(record)
+        temp_df = pd.DataFrame(temp_records)
+        temp_df["m2_delta_t"] = temp_df["m2_air_temp"] - temp_df["m1m3_air_temp"]
+        temp_df["cam_m1m3_delta_t"] = temp_df["cam_air_temp"] - temp_df["m1m3_air_temp"]
+        temp_df["dome_delta_t"] = temp_df["outside_temp"] - temp_df["m1m3_air_temp"]
 
     for col in ess_sensors:
         n_valid = temp_df[col].notna().sum()
@@ -1669,23 +1812,24 @@ async def get_thermal_data(consdb_client, efd_client, visit_info,
     # NaN, which is what we want.
     gradient_df = pd.concat(gradient_parts, ignore_index=True, sort=False)
 
-    # TMA truss temperatures
-    truss_sensors = {
-        "tma_truss_temp_pxpy": ("temperatureItem6", 122),
-        "tma_truss_temp_mxmy": ("temperatureItem7", 122),
-    }
-
-    truss_records = []
-    print(f"Querying TMA truss temperatures...")
-    for _, row in tqdm(unique_visits.iterrows(), total=len(unique_visits)):
-        record = {"day_obs": row["day_obs"], "seq_num": row["seq_num"]}
-        for name, (field, index) in truss_sensors.items():
-            record[name] = await get_ess_temperature(
-                efd_client, row["obs_start"], row["obs_end"], index,
-                field=field, post_padding=temp_time_window_sec,
-            )
-        truss_records.append(record)
-    truss_df = pd.DataFrame(truss_records)
+    # TMA truss temperatures (skip if the ConsDB transform already supplied
+    # them)
+    if truss_df is None:
+        truss_sensors = {
+            "tma_truss_temp_pxpy": ("temperatureItem6", 122),
+            "tma_truss_temp_mxmy": ("temperatureItem7", 122),
+        }
+        truss_records = []
+        print("Querying TMA truss temperatures (per-visit fallback)...")
+        for _, row in tqdm(unique_visits.iterrows(), total=len(unique_visits)):
+            record = {"day_obs": row["day_obs"], "seq_num": row["seq_num"]}
+            for name, (field, index) in truss_sensors.items():
+                record[name] = await get_ess_temperature(
+                    efd_client, row["obs_start"], row["obs_end"], index,
+                    field=field, post_padding=temp_time_window_sec,
+                )
+            truss_records.append(record)
+        truss_df = pd.DataFrame(truss_records)
 
     # Merge all thermal data
     thermal_df = temp_df.merge(gradient_df, on=["day_obs", "seq_num"], how="left")
@@ -1723,8 +1867,8 @@ def get_intrinsic_map(x, y, camera_id_map, band=BandLabel.LSST_I):
 
     binFactor = 2
     config.estimateZernikes.binning = binFactor
-    # Project convention: Noll 4-19, 22-26 (skip the spherical-defocus pair
-    # 20, 21).  Must stay in lockstep with create_intrinsic_interpolators, which
+    # Project convention: Noll 4-19, 22-26 (skip the spherical-defocus pair 20,
+    # 21).  Must stay in lockstep with create_intrinsic_interpolators, which
     # maps these rows back to Noll number positionally.
     nollIndices = np.array(list(range(4, 20)) + list(range(22, 27)))
     config.estimateZernikes.nollIndices = list(nollIndices)
@@ -1825,36 +1969,105 @@ def add_intrinsic_zernikes(aosTable, intrinsic_interpolators, coord_sys):
 # Merge Helpers
 # ============================================================
 
-def _rotator_columns_for(table, rotator_df, want_flagged):
-    """Build per-row rotator_angle (and optionally rotator_flagged) arrays
-    aligned to ``table``, by matching (day_obs, seq_num) against ``rotator_df``.
+#: Values of the ``rotator_angle_source`` column.
+ROTATOR_SOURCE_ROTTELPOS = 'rotTelPos'
+ROTATOR_SOURCE_CONSDB = 'consdb'
+ROTATOR_SOURCE_MISSING = 'missing'
 
-    Shared by merge_rotator_to_visit_info and merge_rotator_to_tables so the
-    two stay in lockstep.  Returns (rot_angle_col, rot_flagged_col_or_None).
+
+def _consdb_rotator_column_for(table, rotator_df):
+    """Per-row ConsDB ``physical_rotator_angle`` in deg, aligned to ``table``
+    by matching (``day_obs``, ``seq_num``) against ``rotator_df``.
     """
     day_obs_arr = np.array(table['day_obs'])
     seq_num_arr = np.array(table['seq_num'])
-    rot_angle_col = np.full(len(table), np.nan)
-    rot_flagged_col = (np.zeros(len(table), dtype=bool)
-                       if want_flagged else None)
+    consdb_col = np.full(len(table), np.nan)
     for _, r in rotator_df.iterrows():
         mask = (day_obs_arr == r['day_obs']) & (seq_num_arr == r['seq_num'])
-        rot_angle_col[mask] = r['rotator_angle']
-        if want_flagged:
-            rot_flagged_col[mask] = r['rotator_flagged']
-    return rot_angle_col, rot_flagged_col
+        consdb_col[mask] = r['physical_rotator_angle']
+    return consdb_col
+
+
+def resolve_rotator_angle(table, rotator_df):
+    """Resolve the camera rotator angle per row: ``rotTelPos`` then ConsDB.
+
+    ``rotTelPos`` is the angle the pipeline used for its own CCS -> OCS
+    rotation, so it is the one that belongs beside the table's OCS field
+    angles.  ConsDB ``physical_rotator_angle`` is the fallback for rows whose
+    donut metadata lacks it; it is NULL on some visits, and where present it
+    differs by a median 0.129 deg and a max 0.456 deg of camera rotator angle
+    (53 visits of chunk 20251116_20251130; about 0.30 deg on the blitz path).
+    The rotator turns during the exposure to hold the sky fixed on the focal
+    plane, so each source samples the angle at a different moment -- expected
+    tracking motion, not an error.
+
+    Parameters
+    ----------
+    table : `astropy.table.QTable` or `pandas.DataFrame`
+        Carries ``day_obs``, ``seq_num`` and ``rotTelPos`` in **radians**.
+    rotator_df : `pandas.DataFrame`
+        Output of `get_rotator_data`: ``physical_rotator_angle`` in deg.
+
+    Returns
+    -------
+    angle : `numpy.ndarray`
+        Camera rotator angle in deg, NaN where neither source has a value.
+    source : `numpy.ndarray`
+        One of ``rotTelPos``, ``consdb``, ``missing`` per row.
+    """
+    n = len(table)
+    consdb_deg = _consdb_rotator_column_for(table, rotator_df)
+
+    names = (table.colnames if hasattr(table, 'colnames') else table.columns)
+    if 'rotTelPos' in names:
+        rottelpos_deg = np.degrees(np.asarray(table['rotTelPos'], dtype=float))
+        # The stored rotTelPos is NOT wrapped: on day_obs 20251116 seq_num
+        # 455 it reads -359.824295 deg where the rotator sits at +0.18 deg.
+        # Left unwrapped it would trip `rotator_flagged` on nearly every
+        # visit and corrupt any rotator binning.
+        # Same convention as `wcsutils.calc_rotator_from_visitinfo`.
+        rottelpos_deg = (rottelpos_deg + 180.0) % 360.0 - 180.0
+    else:
+        rottelpos_deg = np.full(n, np.nan)
+
+    angle = np.full(n, np.nan)
+    source = np.full(n, ROTATOR_SOURCE_MISSING, dtype=object)
+
+    use_rtp = np.isfinite(rottelpos_deg)
+    angle[use_rtp] = rottelpos_deg[use_rtp]
+    source[use_rtp] = ROTATOR_SOURCE_ROTTELPOS
+
+    use_cdb = (~use_rtp) & np.isfinite(consdb_deg)
+    angle[use_cdb] = consdb_deg[use_cdb]
+    source[use_cdb] = ROTATOR_SOURCE_CONSDB
+
+    return angle, source.astype(str)
 
 
 def merge_rotator_to_visit_info(rotator_df, visit_info, rotator_threshold):
-    """Add rotator_angle + rotator_flagged to visit_info only (no aosTable)."""
-    rot_angle_col, rot_flagged_col = _rotator_columns_for(
-        visit_info, rotator_df, want_flagged=True)
+    """Add rotator_angle, rotator_angle_source and rotator_flagged to
+    visit_info only (no aosTable).
+    """
+    rot_angle_col, source_col = resolve_rotator_angle(visit_info, rotator_df)
+    with np.errstate(invalid='ignore'):
+        rot_flagged_col = np.abs(rot_angle_col) > rotator_threshold
     visit_info['rotator_angle'] = rot_angle_col
+    visit_info['rotator_angle_source'] = source_col
     visit_info['rotator_flagged'] = rot_flagged_col
 
+    n_rtp = int(np.sum(source_col == ROTATOR_SOURCE_ROTTELPOS))
+    n_cdb = int(np.sum(source_col == ROTATOR_SOURCE_CONSDB))
+    n_none = int(np.sum(source_col == ROTATOR_SOURCE_MISSING))
     n_flagged = int(np.sum(rot_flagged_col))
-    print(f"Added rotator columns to visit_info. "
-          f"Flagged: {n_flagged} (|angle| > {rotator_threshold} deg)")
+    print(f"\nRotator angle sources (dimensionless visit counts): "
+          f"rotTelPos={n_rtp}, ConsDB={n_cdb}, missing={n_none}")
+    if n_none:
+        bad = [(int(d), int(s)) for d, s, src
+               in zip(visit_info['day_obs'], visit_info['seq_num'], source_col)
+               if src == ROTATOR_SOURCE_MISSING]
+        print(f"  rotator_angle is NaN on {n_none} visit(s), neither "
+              f"rotTelPos nor ConsDB available: {bad}")
+    print(f"Flagged (|rotator_angle| > {rotator_threshold} deg): {n_flagged}")
     return visit_info
 
 
@@ -1934,9 +2147,9 @@ def plot_visit_quality_diagnostics(visit_info, output_pdf=None,
     """Three-panel validation plot of per-visit quality metrics.
 
     Plots, vs visit ordinal (sorted day_obs, seq_num):
-      1. n_donuts                        + horizontal line at min_donuts_per_visit
-      2. n_detectors_with_min_donuts     + horizontal line at min_detectors_per_visit
-      3. median_blur_arcsec              + horizontal line at max_median_blur_arcsec
+      1. n_donuts                     + line at min_donuts_per_visit
+      2. n_detectors_with_min_donuts  + line at min_detectors_per_visit
+      3. median_blur_arcsec           + line at max_median_blur_arcsec
 
     Visits that pass all cuts are coloured blue; failing visits red.
 
@@ -2010,7 +2223,7 @@ def plot_visit_quality_diagnostics(visit_info, output_pdf=None,
                 continue
             cls = classifications[i]
             style = visit_marker_style(elev=cls['elev'], rot=cls['rot'],
-                                        band=cls['band'], base_size=7)
+                                       band=cls['band'], base_size=7)
             alpha = 0.95 if pass_mask[i] else 0.30
             ax.plot(x[i], y[i], alpha=alpha, **style)
 
@@ -2067,22 +2280,27 @@ def plot_visit_quality_diagnostics(visit_info, output_pdf=None,
 
 
 def merge_rotator_to_tables(rotator_df, aosTable, visit_info, rotator_threshold):
-    """Add rotator_angle and rotator_flagged to aosTable and visit_info."""
-    rot_angle_col, rot_flagged_col = _rotator_columns_for(
-        aosTable, rotator_df, want_flagged=True)
+    """Add rotator_angle and rotator_flagged to aosTable and visit_info.
+
+    The donut table carries no ``rotTelPos`` column of its own, so a row
+    resolves through ConsDB unless ``visit_info`` has already supplied the
+    angle; prefer `merge_rotator_to_visit_info`.
+    """
+    rot_angle_col, source_col = resolve_rotator_angle(aosTable, rotator_df)
+    with np.errstate(invalid='ignore'):
+        rot_flagged_col = np.abs(rot_angle_col) > rotator_threshold
     aosTable['rotator_angle'] = rot_angle_col
+    aosTable['rotator_angle_source'] = source_col
     aosTable['rotator_flagged'] = rot_flagged_col
 
     n_flagged = int(np.sum(rot_flagged_col))
     print(f"Added rotator columns to aosTable. "
           f"Flagged: {n_flagged} (|angle| > {rotator_threshold} deg)")
 
-    # Add rotator_angle to visit_info (angle only, no flag — preserves prior
-    # behaviour of this function).
     if visit_info is not None:
-        vi_angle, _ = _rotator_columns_for(
-            visit_info, rotator_df, want_flagged=False)
+        vi_angle, vi_source = resolve_rotator_angle(visit_info, rotator_df)
         visit_info['rotator_angle'] = vi_angle
+        visit_info['rotator_angle_source'] = vi_source
         print("Added rotator_angle to visit_info")
 
     return aosTable, visit_info
@@ -2111,7 +2329,8 @@ def merge_program_reason_to_visit_info(visits_df, visit_info):
     lookup = {}
     for _, row in visits_df.iterrows():
         try:
-            d = int(row['day_obs']); s = int(row['seq_num'])
+            d = int(row['day_obs'])
+            s = int(row['seq_num'])
         except Exception:
             continue
         prog = str(row['science_program']) if has_program else ''
@@ -2232,7 +2451,6 @@ async def run_mktable(
         os.environ["no_proxy"] += ",.consdb"
 
     camera = LsstCam.getCamera()
-    camera_id_map = camera.getIdMap()
     if consdb_url is None:
         consdb_url = DEFAULT_CONSDB_URL
     # If using an external URL, embed token from ~/.lsst/consdb_token
@@ -2280,7 +2498,7 @@ async def run_mktable(
                 if Path(p).exists()]
     if existing and not overwrite:
         raise FileExistsError(
-            f"Output file(s) already exist — refusing to overwrite:\n  "
+            "Output file(s) already exist — refusing to overwrite:\n  "
             + "\n  ".join(existing)
             + "\nPass overwrite=True (or --overwrite from the CLI) to replace them.")
 
@@ -2407,7 +2625,7 @@ async def run_mktable(
         print(f"  thermocouples: {tc_meta_file} — {len(tc_meta)} thermocouples "
               f"(name, x, y, z, scanner)")
 
-    print(f"\nSaved:")
+    print("\nSaved:")
     print(f"  donuts: {output_file} (streamed, one row group per visit)")
     print(f"  visits: {visits_file} — {len(visit_info)} rows, "
           f"{len(visit_info.columns)} columns")

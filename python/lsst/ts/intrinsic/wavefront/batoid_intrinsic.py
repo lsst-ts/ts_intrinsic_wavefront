@@ -23,10 +23,10 @@
 
 The measured intrinsic wavefront (MIW) maps only carry the Noll indices the
 donut wavefront estimation solved for.  The telescope-fixed **OCS** intrinsic
-for the *unmeasured* Noll indices is well described by the batoid optical design,
-so this module evaluates that design intrinsic on the MIW field grid (via
-``batoid_rubin``'s ``LSSTBuilder`` and the Rubin **v3.14** as-built optical
-model) and backfills the missing ``Z{j}_OCS`` columns.
+for the *unmeasured* Noll indices is well described by the batoid optical
+design, so this module evaluates that design intrinsic on the MIW field grid
+(via ``batoid_rubin``'s ``LSSTBuilder`` and the Rubin **v3.14** as-built
+optical model) and backfills the missing ``Z{j}_OCS`` columns.
 
 The camera-fixed **CCS** term for those Noll is left at **zero** -- there is no
 measured camera field for them -- which both matches the pipeline's existing
@@ -35,13 +35,14 @@ systems on the *identical* Noll set that ``lsst.ip.isr.IntrinsicZernikes``
 requires (it rejects tables whose Noll indices disagree).
 
 The recipe mirrors ts_aos_analysis ``generateIntrinsics`` (lsst-sitcom PR 87):
-field angles are passed to batoid as ``theta_x = thx_deg``, ``theta_y = thy_deg``
-(the MIW map convention, ``thx`` = ``FIELD_ANGLE`` y), a gnomonic projection
-(DM's ``FIELD_ANGLE`` convention), and the Zernike *waves* are scaled by the band
-wavelength to a physical length.  Unlike ``generateIntrinsics`` -- which builds a
-per-detector telescope on a per-detector footprint grid -- the OCS map is
-telescope-fixed and detector-independent, so a single ``build()`` is evaluated on
-the whole-focal-plane MIW grid.
+field angles are passed to batoid as ``theta_x = thx_deg``, ``theta_y =
+thy_deg`` (the MIW map convention, ``thx`` = ``FIELD_ANGLE`` y), a gnomonic
+projection (DM's ``FIELD_ANGLE`` convention), and the Zernike *waves* are
+scaled by the band wavelength to a physical length. Unlike
+``generateIntrinsics`` -- which builds a per-detector telescope on a
+per-detector footprint grid -- the OCS map is telescope-fixed and
+detector-independent, so a single ``build()`` is evaluated on the
+whole-focal-plane MIW grid.
 """
 
 __all__ = [
@@ -65,11 +66,12 @@ BAND_WAVELENGTH_M = {
     "y": 0.973e-6,
 }
 
-# batoid optical-model yaml stem.  'Rubin_v3.14' -> Rubin_v3.14_{band}.yaml (the
-# latest as-built model); 'LSST' -> LSST_{band}.yaml (the nominal design).
+# batoid optical-model yaml stem.  'Rubin_v3.14' -> Rubin_v3.14_{band}.yaml
+# (the latest as-built model); 'LSST' -> LSST_{band}.yaml (the nominal design).
 DEFAULT_OPTICAL_MODEL = "Rubin_v3.14"
 
-# batoid.zernike sampling parameters (ts_aos_analysis generateIntrinsics values).
+# batoid.zernike sampling parameters (ts_aos_analysis generateIntrinsics
+# values).
 DEFAULT_EPS = 0.612            # pupil obscuration fraction
 DEFAULT_NX = 63               # ray grid per side
 DEFAULT_PROJECTION = "gnomonic"  # DM's FIELD_ANGLE convention
